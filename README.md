@@ -1,11 +1,6 @@
 # Production-Grade RAG Pipeline
 
-[![CI](https://github.com/rajarshidattapy/production-grade-rag/actions/workflows/ci.yml/badge.svg)](https://github.com/rajarshidattapy/production-grade-rag/actions/workflows/ci.yml)
-[![Evaluate](https://github.com/rajarshidattapy/production-grade-rag/actions/workflows/evaluate.yml/badge.svg)](https://github.com/rajarshidattapy/production-grade-rag/actions/workflows/evaluate.yml)
-[![Docker](https://github.com/rajarshidattapy/production-grade-rag/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/rajarshidattapy/production-grade-rag/actions/workflows/docker-publish.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-124%20passing-brightgreen.svg)](#testing)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A production-ready **Retrieval-Augmented Generation (RAG)** system built with FastAPI, ChromaDB, and dual LLM support (OpenAI + Anthropic). Demonstrates the full spectrum from a clean vector-search baseline to advanced hybrid retrieval, cross-encoder reranking, OpenTelemetry metrics, Langfuse tracing, and LLM-as-Judge evaluation — all wired together in a deployable, observable, and testable package.
 
