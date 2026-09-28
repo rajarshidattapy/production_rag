@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import time
 import uuid
@@ -36,6 +37,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from src.config import settings as _settings
 from src.generation.citations import CitationFormatter
+from src.healing.metrics import HEALING_REGISTRY
 from src.pipeline import RAGPipeline
 from src.utils.i18n import _
 
@@ -314,6 +316,13 @@ class QueryRequest(BaseModel):
     top_k: int | None = None
     use_hybrid: bool = False
     use_reranker: bool = False
+    self_heal: bool | None = Field(
+        None,
+        description=(
+            "Run the self-healing verify/repair loop. Omit to use the server default "
+            "(RAG_SELF_HEALING_ENABLED)."
+        ),
+    )
 
 
 class CitationResponse(BaseModel):
@@ -324,9 +333,32 @@ class CitationResponse(BaseModel):
     score: float
 
 
+class HealingResponse(BaseModel):
+    status: str
+    attempts: int
+    recovered: bool
+    reason: str | None = None
+    failure_types: list[str] = []
+    query_rewrites: list[str] = []
+    final_faithfulness: float | None = None
+    final_relevance: float | None = None
+    citation_valid: bool | None = None
+
+
 class QueryResponse(BaseModel):
     answer: str
     citations: list[CitationResponse]
+    # Present only when self-healing ran; omitted otherwise so existing
+    # clients see byte-identical responses.
+    healing: HealingResponse | None = None
+
+
+def _healing_requested(request: QueryRequest) -> bool:
+    return _settings.self_healing_enabled if request.self_heal is None else request.self_heal
+
+
+def _healing_payload(info: Any) -> dict[str, Any]:
+    return info.model_dump(mode="json")
 
 
 @app.get("/healthz", response_model=HealthResponse)
@@ -368,9 +400,9 @@ def stats() -> dict[str, Any]:
 
 @app.get("/metrics", dependencies=[_auth])
 def metrics() -> Response:
-    """Prometheus scrape endpoint: request counts and latency histograms by route."""
+    """Prometheus scrape endpoint: HTTP request counts/latency plus rag_healing_* metrics."""
     return Response(
-        content=generate_latest(_metrics_registry),
+        content=generate_latest(_metrics_registry) + generate_latest(HEALING_REGISTRY),
         media_type=CONTENT_TYPE_LATEST,
     )
 
@@ -493,9 +525,19 @@ def get_ingest_job(job_id: str) -> IngestJobStatusResponse:
     return IngestJobStatusResponse(job_id=job_id, **job)
 
 
-@app.post("/query", response_model=QueryResponse, dependencies=[_auth])
+@app.post(
+    "/query",
+    response_model=QueryResponse,
+    response_model_exclude_none=True,
+    dependencies=[_auth],
+)
 async def query(request: QueryRequest, response: Response) -> QueryResponse:
-    """Answer a question using the RAG pipeline."""
+    """Answer a question using the RAG pipeline.
+
+    With self-healing enabled (per request or server default), the answer is
+    verified and repaired before being returned, or the service abstains; the
+    ``healing`` field then describes what happened.
+    """
     from src.utils.usage import UsageTracker, request_usage
 
     tracker = UsageTracker()
@@ -503,14 +545,27 @@ async def query(request: QueryRequest, response: Response) -> QueryResponse:
 
     try:
         pipeline = get_pipeline()
+        healing: HealingResponse | None = None
 
         try:
-            answer, citations = await pipeline.query_async(
-                request.question,
-                top_k=request.top_k,
-                use_hybrid=request.use_hybrid,
-                use_reranker=request.use_reranker,
-            )
+            if _healing_requested(request):
+                result = await pipeline.query_with_healing_async(
+                    request.question,
+                    top_k=request.top_k,
+                    use_hybrid=request.use_hybrid,
+                    use_reranker=request.use_reranker,
+                )
+                answer, citations = result.answer, result.citations
+                healing = HealingResponse(**_healing_payload(result.info))
+                response.headers["X-RAG-Healing-Status"] = result.info.status
+                response.headers["X-RAG-Healing-Attempts"] = str(result.info.attempts)
+            else:
+                answer, citations = await pipeline.query_async(
+                    request.question,
+                    top_k=request.top_k,
+                    use_hybrid=request.use_hybrid,
+                    use_reranker=request.use_reranker,
+                )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -531,7 +586,7 @@ async def query(request: QueryRequest, response: Response) -> QueryResponse:
         response.headers["X-RAG-Total-Tokens"] = str(tracker.total_tokens)
         response.headers["X-RAG-LLM-Latency-Sec"] = f"{tracker.total_latency:.4f}"
 
-        return QueryResponse(answer=answer, citations=citation_responses)
+        return QueryResponse(answer=answer, citations=citation_responses, healing=healing)
     finally:
         request_usage.reset(token)
 
@@ -539,6 +594,11 @@ async def query(request: QueryRequest, response: Response) -> QueryResponse:
 # ---------------------------------------------------------------------------
 # Streaming endpoint — Server-Sent Events
 # ---------------------------------------------------------------------------
+
+
+# Word-sized pieces (keeping trailing whitespace) for streaming an already
+# verified answer, so clients render it the same way as live LLM tokens.
+_SSE_CHUNK_RE = re.compile(r"\S+\s*|\s+")
 
 
 @app.post("/query/stream", dependencies=[_auth])
@@ -549,8 +609,14 @@ async def query_stream(request: QueryRequest) -> StreamingResponse:
 
     Each SSE event is one of:
     - ``data: {"token": "<text>"}``   — a generated text chunk
+    - ``data: {"healing": {...}}``     — healing metadata (only when self-healing ran)
     - ``data: {"citations": [...]}``   — final citation list (last event before DONE)
     - ``data: [DONE]``                 — stream complete
+
+    With self-healing enabled, an answer cannot be un-sent once streamed, so
+    the verify/repair loop runs to completion first and only the *verified*
+    answer (or the abstention message) is streamed. Time-to-first-token is
+    therefore the full healing latency in that mode.
 
     Example (curl)::
 
@@ -571,6 +637,20 @@ async def query_stream(request: QueryRequest) -> StreamingResponse:
             if len(question) > RAGPipeline.MAX_QUESTION_LENGTH:
                 yield f"data: {json.dumps({'error': 'Question exceeds maximum length.'})}\n\n"
                 yield "data: [DONE]\n\n"
+                return
+
+            if _healing_requested(request):
+                result = await pipeline.query_with_healing_async(
+                    question,
+                    top_k=request.top_k,
+                    use_hybrid=request.use_hybrid,
+                    use_reranker=request.use_reranker,
+                )
+                for piece in _SSE_CHUNK_RE.findall(result.answer):
+                    yield f"data: {json.dumps({'token': piece})}\n\n"
+                yield f"data: {json.dumps({'healing': _healing_payload(result.info)})}\n\n"
+                citation_dicts = CitationFormatter.to_dict(result.citations)
+                yield f"data: {json.dumps({'citations': citation_dicts})}\n\n"
                 return
 
             k = request.top_k or _settings.top_k_final

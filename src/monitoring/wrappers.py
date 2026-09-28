@@ -219,6 +219,30 @@ def intercept_token_usage(usage_dict: dict[str, int]):
                     _dynamic_anthropic_patch_active = False
 
 
+class _HookObserver:
+    """Adapts the healing engine's observer protocol onto extension lifecycle hooks."""
+
+    def __init__(self, run_hook: Any) -> None:
+        self._run_hook = run_hook
+
+    def on_step_start(
+        self, name: str, input_data: dict[str, Any], metadata: dict[str, Any]
+    ) -> None:
+        self._run_hook("on_step_start", name, input_data, metadata)
+
+    def on_step_end(
+        self,
+        name: str,
+        output: dict[str, Any],
+        elapsed: float,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self._run_hook("on_step_end", name, output, elapsed, metadata=metadata)
+
+    def on_step_error(self, name: str, exc: Exception) -> None:
+        self._run_hook("on_step_error", name, exc)
+
+
 class MonitoredRAGPipeline:
     """Instrumented wrapper around RAGPipeline.
 
@@ -299,6 +323,8 @@ class MonitoredRAGPipeline:
             use_reranker: bool = False,
             k: int = 5,
             lang: str = "en",
+            fetch_k: int | None = None,
+            alpha: float | None = None,
         ):
             start_time = time.monotonic()
             input_data = {
@@ -308,6 +334,14 @@ class MonitoredRAGPipeline:
                 "k": k,
                 "lang": lang,
             }
+            # Self-healing retries pass these overrides; forward them only when
+            # set so wrapped retrievers with the original signature still work.
+            overrides = {
+                name: value
+                for name, value in (("fetch_k", fetch_k), ("alpha", alpha))
+                if value is not None
+            }
+            input_data.update(overrides)
 
             self._run_hook("on_step_start", "retrieve", input_data, {})
 
@@ -331,6 +365,7 @@ class MonitoredRAGPipeline:
                 p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
             ):
                 kwargs["lang"] = lang
+            kwargs.update(overrides)
 
             try:
                 contexts = original_retrieve(query, **kwargs)
@@ -480,6 +515,12 @@ class MonitoredRAGPipeline:
 
         self._pipeline.generator.generate = monitored_generate
 
+        # 4. Route self-healing steps (retrieve_attempt_N, query_rewrite,
+        #    verify_attempt_N, ...) through the same extension hooks so each
+        #    attempt shows up as its own span under the query trace.
+        if hasattr(self._pipeline, "set_healing_observer"):
+            self._pipeline.set_healing_observer(_HookObserver(self._run_hook))
+
     def ingest(self, source: Path | str) -> int:
         self._run_hook("on_step_start", "ingest", {"source": str(source)}, {})
 
@@ -499,6 +540,7 @@ class MonitoredRAGPipeline:
         top_k: int | None = None,
         use_hybrid: bool = False,
         use_reranker: bool = False,
+        self_heal: bool | None = None,
     ) -> tuple[str, list[Any]]:
         start = time.monotonic()
         metadata = {
@@ -506,6 +548,12 @@ class MonitoredRAGPipeline:
             "reranker": use_reranker,
             "top_k": top_k,
         }
+        # Only forward self_heal when set, so wrapped pipelines that predate
+        # self-healing (or test doubles) keep receiving the original kwargs.
+        extra: dict[str, Any] = {}
+        if self_heal is not None:
+            extra["self_heal"] = self_heal
+            metadata["self_heal"] = self_heal
 
         self._last_query_tokens = {"prompt": 0, "completion": 0, "total": 0}
         self._last_query_cost = 0.0
@@ -519,6 +567,7 @@ class MonitoredRAGPipeline:
                 top_k=top_k,
                 use_hybrid=use_hybrid,
                 use_reranker=use_reranker,
+                **extra,
             )
         except Exception as exc:
             self._run_hook("on_query_error", exc)
@@ -537,6 +586,46 @@ class MonitoredRAGPipeline:
         )
 
         return answer, citations
+
+    def query_with_healing(
+        self,
+        question: str,
+        top_k: int | None = None,
+        use_hybrid: bool = False,
+        use_reranker: bool = False,
+    ) -> Any:
+        """Traced self-healing query.
+
+        Produces a ``query`` root span whose children are the per-attempt
+        healing steps (``retrieve_attempt_1``, ``verify_attempt_1``,
+        ``query_rewrite``, ``retrieve_attempt_2``, ...).
+        """
+        start = time.monotonic()
+        metadata = {
+            "hybrid": use_hybrid,
+            "reranker": use_reranker,
+            "top_k": top_k,
+            "self_heal": True,
+        }
+        self._last_query_tokens = {"prompt": 0, "completion": 0, "total": 0}
+        self._last_query_cost = 0.0
+        self._run_hook("on_query_start", question, metadata)
+        try:
+            result = self._pipeline.query_with_healing(
+                question, top_k=top_k, use_hybrid=use_hybrid, use_reranker=use_reranker
+            )
+        except Exception as exc:
+            self._run_hook("on_query_error", exc)
+            raise
+        self._run_hook(
+            "on_query_end",
+            result.answer,
+            result.citations,
+            time.monotonic() - start,
+            self._last_query_tokens,
+            self._last_query_cost,
+        )
+        return result
 
     def query_stream(
         self,

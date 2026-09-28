@@ -179,6 +179,7 @@ class HybridRetriever:
         query: str,
         k: int = 10,
         where: dict[str, str | int | float] | None = None,
+        alpha: float | None = None,
     ) -> list[dict[str, Any]]:
         """Perform hybrid search: BM25 + vector, fused with RRF.
 
@@ -186,10 +187,19 @@ class HybridRetriever:
             query: The search query string.
             k: Number of final results.
             where: Optional metadata filter for vector search.
+            alpha: Per-call override of the vector/BM25 weight. The retriever is
+                shared across requests, so callers that need a different balance
+                (e.g. self-healing retries) pass it here instead of mutating
+                ``self.alpha``.
 
         Returns:
             Ranked list of result dicts (id, document, metadata, score).
         """
+        if alpha is None:
+            alpha = self.alpha
+        elif not 0.0 <= alpha <= 1.0:
+            raise ValueError(f"alpha must be in [0, 1], got {alpha}")
+
         # --- BM25 scores ---
         bm25_results = self._bm25_search(query, k)
         bm25_rank = {r["id"]: i for i, r in enumerate(bm25_results)}
@@ -206,7 +216,7 @@ class HybridRetriever:
             bm25_r = bm25_rank.get(doc_id, k)  # default to worst rank
             vec_r = vector_rank.get(doc_id, k)
             # Weighted RRF
-            score = self.alpha * (1.0 / (self.rrf_k + vec_r + 1)) + (1.0 - self.alpha) * (
+            score = alpha * (1.0 / (self.rrf_k + vec_r + 1)) + (1.0 - alpha) * (
                 1.0 / (self.rrf_k + bm25_r + 1)
             )
             rrf_scores[doc_id] = score

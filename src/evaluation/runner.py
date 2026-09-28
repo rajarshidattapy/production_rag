@@ -83,6 +83,7 @@ class EvaluationRunner:
         use_hybrid: bool = False,
         use_reranker: bool = False,
         fail_on_threshold: bool = False,
+        self_heal: bool | None = None,
     ) -> list[EvalResult]:
         """Run the full evaluation suite.
 
@@ -91,6 +92,7 @@ class EvaluationRunner:
             use_reranker: Enable cross-encoder re-ranking (Phase 2).
             fail_on_threshold: If True, raise EvaluationFailed when quality
                               drops below threshold (for CI use).
+            self_heal: Run queries through the self-healing loop (None = config default).
 
         Returns:
             List of EvalResult objects.
@@ -107,13 +109,14 @@ class EvaluationRunner:
             with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
                 results = list(
                     pool.map(
-                        lambda ex: self._evaluate_single(ex, use_hybrid, use_reranker),
+                        lambda ex: self._evaluate_single(ex, use_hybrid, use_reranker, self_heal),
                         examples,
                     )
                 )
         else:
             results = [
-                self._evaluate_single(example, use_hybrid, use_reranker) for example in examples
+                self._evaluate_single(example, use_hybrid, use_reranker, self_heal)
+                for example in examples
             ]
 
         # Save results
@@ -138,13 +141,16 @@ class EvaluationRunner:
         example: EvalExample,
         use_hybrid: bool,
         use_reranker: bool,
+        self_heal: bool | None = None,
     ) -> EvalResult:
         """Evaluate a single example."""
-        # Generate answer
+        # Only pass self_heal when set so pipelines/wrappers without it still work.
+        extra = {} if self_heal is None else {"self_heal": self_heal}
         answer, citations = self.pipeline.query(
             example.question,
             use_hybrid=use_hybrid,
             use_reranker=use_reranker,
+            **extra,
         )
 
         # Build contexts from citations for faithfulness scoring

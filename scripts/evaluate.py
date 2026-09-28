@@ -7,6 +7,8 @@ Usage:
     python scripts/evaluate.py --fail-on-threshold       # Exit non-zero if below threshold (CI mode)
     python scripts/evaluate.py --create-sample-dataset   # Create a sample dataset first
     python scripts/evaluate.py --provider anthropic      # Use Anthropic as eval judge
+    python scripts/evaluate.py --self-heal               # Standard eval with self-healing on
+    python scripts/evaluate.py --healing-report --hybrid # Baseline vs. healing on the hard set
 """
 
 from __future__ import annotations
@@ -61,6 +63,24 @@ def main() -> None:
         choices=["openai", "anthropic"],
         default=settings.llm_provider,
         help="LLM provider for the judge model (default: from RAG_LLM_PROVIDER env var)",
+    )
+    parser.add_argument(
+        "--self-heal",
+        action="store_true",
+        help="Run the standard evaluation with the self-healing loop enabled",
+    )
+    parser.add_argument(
+        "--healing-report",
+        action="store_true",
+        help=(
+            "Run baseline vs. self-healing on the hard healing dataset "
+            "(data/golden_dataset/healing_dataset.jsonl) and print healing metrics"
+        ),
+    )
+    parser.add_argument(
+        "--healing-dataset",
+        default="data/golden_dataset/healing_dataset.jsonl",
+        help="Dataset used by --healing-report",
     )
     args = parser.parse_args()
 
@@ -119,6 +139,28 @@ def main() -> None:
         pipeline = MonitoredRAGPipeline(pipeline, tracer=tracer, metrics=metrics)
         atexit.register(metrics.export_summary, "monitoring-summary.json")
 
+    if args.healing_report:
+        from src.evaluation.healing_eval import HealingEvaluator
+
+        evaluator = HealingEvaluator(
+            pipeline=pipeline,
+            dataset=GoldenDataset(args.healing_dataset),
+            eval_provider=args.provider,
+            faithfulness_threshold=args.threshold,
+            relevance_threshold=settings.relevance_threshold,
+        )
+        records = evaluator.run(use_hybrid=args.hybrid, use_reranker=args.reranker)
+        if not records:
+            print(f"No examples found in {args.healing_dataset}.")
+            sys.exit(1)
+        evaluator.print_report(records)
+        if args.export_ci_summary:
+            import json
+
+            with open("healing-eval-summary.json", "w") as f:
+                json.dump(evaluator.summarize(records), f, indent=2)
+        return
+
     dataset = GoldenDataset()
     runner = EvaluationRunner(
         pipeline=pipeline,
@@ -132,6 +174,7 @@ def main() -> None:
             use_hybrid=args.hybrid,
             use_reranker=args.reranker,
             fail_on_threshold=args.fail_on_threshold,
+            self_heal=True if args.self_heal else None,
         )
     except EvaluationFailed as e:
         print(f"EVALUATION FAILED: {e}")
