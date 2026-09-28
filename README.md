@@ -20,18 +20,45 @@ Query → Language detection → HybridRetriever (RRF fusion)
                            Answer + Citations + OTel traces
 ```
 
-### Three Progressive Phases
+### Self-Healing Loop (Phase 4, opt-in)
+
+```mermaid
+flowchart TD
+    Q[Query] --> A[Query analysis]
+    A --> R[Hybrid retrieval<br/>BM25 + vector + RRF]
+    R --> RR[Cross-encoder rerank]
+    RR --> G[Generate]
+    G --> V{Verifier<br/>deterministic checks → LLM judge}
+    V -- PASS --> OK[Answer + citations<br/>+ healing metadata]
+    V -- FAIL --> D{Failure diagnosis}
+    D -- RETRIEVAL / QUERY --> RW[Rewrite query<br/>widen k · re-balance α · multi-query fusion]
+    RW --> R
+    D -- CONTEXT --> EX[More passages<br/>bigger context budget]
+    EX --> R
+    D -- GENERATION / CITATION --> RG[Regenerate on same context<br/>with repair prompt]
+    RG --> V
+    D -- max attempts --> AB[Abstain<br/>status: abstained · reason · attempts]
+```
+
+Every retry changes system behaviour based on the diagnosis — a different query, a
+different retrieval plan, or a different generation prompt — and is re-verified.
+See **[docs/SELF_HEALING.md](docs/SELF_HEALING.md)** for the state machine, failure
+types, repair strategies, metrics, and limitations.
+
+### Four Progressive Phases
 
 | Phase | What's added | Key files |
 |-------|-------------|-----------|
 | **1 — Core RAG** | Document loading, recursive chunking, ChromaDB vector store, OpenAI/Anthropic generation, citations | `src/ingestion/`, `src/retrieval/vector_store.py`, `src/generation/` |
 | **2 — Hybrid Search + Reranking** | BM25 keyword index, Reciprocal Rank Fusion (RRF), cross-encoder reranker, per-language collections | `src/retrieval/hybrid.py`, `src/retrieval/reranker.py` |
 | **3 — Evaluation + Observability** | LLM-as-Judge faithfulness scoring, golden dataset CI gate, OpenTelemetry metrics, Langfuse tracing, prompt registry | `src/evaluation/`, `src/monitoring/` |
+| **4 — Self-Healing** | Post-generation verifier, deterministic failure diagnosis, query rewriting, adaptive retrieval, generation repair, structured abstention, healing metrics/traces, baseline-vs-healed evaluation | `src/healing/`, `src/evaluation/healing_eval.py` |
 
 ---
 
 ## Features
 
+- **Self-Healing Answers (opt-in)** — A verifier checks every answer (citation range and support, retrieval sufficiency, refusal detection, then an LLM judge for faithfulness, relevance, and unresolved contradictions). Failures are diagnosed deterministically into retrieval / query / context / generation / citation failures and repaired accordingly — query rewrite with adapted hybrid retrieval, context expansion, or regeneration with a repair prompt — then re-verified. After `RAG_MAX_HEALING_ATTEMPTS` the service returns a structured abstention instead of an unverified answer. Enable with `RAG_SELF_HEALING_ENABLED=true` or `"self_heal": true` per request.
 - **Hybrid Search** — BM25 (rank-bm25) + ChromaDB vector similarity fused with Reciprocal Rank Fusion (RRF). Alpha controls the balance; the corpus index persists to disk with 0o600 permissions and a 500 MB safety guard.
 - **Query Embedding Cache** — An in-process LRU cache (`RAG_EMBEDDING_QUERY_CACHE_SIZE`, default 256) avoids re-running the embedding model for repeated/paraphrased queries — common in eval runs and demos. Cache hit/miss counts are exposed via `/stats` and `/metrics`.
 - **Cross-Encoder Reranking** — `BAAI/bge-reranker-large` (configurable) reorders retrieved chunks for maximum relevance before generation.
@@ -48,7 +75,7 @@ Query → Language detection → HybridRetriever (RRF fusion)
 - **Context Budget Management** — Configurable `max_context_chars` trims retrieved chunks to fit within the LLM context window without truncating mid-sentence.
 - **Security Hardening** — Path-traversal guards on `/ingest`, BM25 index serialized as JSON (not pickle), 0o600 file permissions on data files, `re.escape()` on pricing pattern matching to prevent ReDoS.
 - **Docker Multi-Stage Build** — `deps → model-cache → runtime` stages; non-root user, no model download at container start.
-- **124 Tests, 3 CI Workflows** — Unit + integration tests with coverage, automatic quality gate evaluation, and GHCR Docker publish on release.
+- **239 Tests, 3 CI Workflows** — Unit + integration tests with coverage (LLM calls mocked; no API keys needed), automatic quality gate evaluation, and GHCR Docker publish on release.
 
 ---
 
@@ -119,7 +146,7 @@ uvicorn src.api.app:app --reload --host 0.0.0.0 --port 8000
 | `GET` | `/healthz` | Liveness probe — returns `{"status": "ok"}` |
 | `GET` | `/readyz` | Readiness probe — warms embedding model |
 | `GET` | `/stats` | Pipeline statistics (chunks, model, config) |
-| `GET` | `/metrics` | Prometheus scrape endpoint — request count + latency histograms by route |
+| `GET` | `/metrics` | Prometheus scrape endpoint — request count + latency histograms by route, plus `rag_healing_*` metrics |
 | `POST` | `/ingest` | Ingest documents from a server-accessible path (blocks until done) |
 | `POST` | `/ingest/async` | Enqueue ingestion as a background job; returns `job_id` immediately (202) |
 | `GET` | `/ingest/jobs/{job_id}` | Poll status of an async ingestion job |
@@ -148,6 +175,23 @@ Response:
 }
 ```
 
+Add `"self_heal": true` (or set `RAG_SELF_HEALING_ENABLED=true`) to verify and repair
+the answer before it is returned. The response then includes an extra `healing`
+object — omitted entirely when healing did not run, so existing clients are unaffected:
+
+```json
+{
+  "answer": "Hybrid search combines... [1]",
+  "citations": [...],
+  "healing": {"status": "recovered", "attempts": 2, "recovered": true,
+              "failure_types": ["RETRIEVAL_FAILURE"], "query_rewrites": ["..."]}
+}
+```
+
+If no verified answer can be produced, the answer is
+`"Unable to answer reliably from the available context."` with
+`"healing": {"status": "abstained", "reason": "insufficient_verified_context", "attempts": 3, ...}`.
+
 ### POST /query/stream
 
 Same request body as `/query`. Response is a stream of Server-Sent Events:
@@ -159,6 +203,9 @@ data: {"token": " search"}
 data: {"citations": [...]}
 data: [DONE]
 ```
+
+With self-healing on, the answer is verified first and only the verified answer is
+streamed, with one extra `data: {"healing": {...}}` event before `citations`.
 
 ### Request Headers
 
@@ -194,6 +241,22 @@ All settings use the `RAG_` prefix and can be set via `.env` or environment vari
 | `RAG_CORS_ORIGINS` | `*` | Comma-separated allowed CORS origins |
 | `RAG_API_KEY` | *(unset)* | Bearer token for API auth (disabled when unset) |
 | `RAG_LOG_LEVEL` | `INFO` | Logging level |
+
+### Self-Healing Settings
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RAG_SELF_HEALING_ENABLED` | `false` | Server-wide default (per-request `self_heal` overrides) |
+| `RAG_MAX_HEALING_ATTEMPTS` | `3` | Total generate→verify attempts, including the first |
+| `RAG_VERIFIER_ENABLED` | `true` | LLM judge in the verifier (deterministic checks always run) |
+| `RAG_VERIFIER_LLM_MODEL` | *(= `RAG_LLM_MODEL`)* | Judge model |
+| `RAG_FAITHFULNESS_THRESHOLD` | `0.7` | Faithfulness pass bar (shared with the eval gate) |
+| `RAG_RELEVANCE_THRESHOLD` | `0.7` | Relevance pass bar |
+| `RAG_MIN_RETRIEVAL_SCORE` | `0.2` | Floor for the top vector / cross-encoder score (not RRF) |
+| `RAG_MIN_QUERY_COVERAGE` | `0.4` | Query-term coverage floor (hard gate only without a judge verdict) |
+| `RAG_MIN_CITATION_SUPPORT` | `0.5` | Fraction of cited sentences that must overlap the cited passage |
+
+More tuning knobs (`RAG_HEALING_*`) are documented in [docs/SELF_HEALING.md](docs/SELF_HEALING.md#configuration).
 
 ### Monitoring Settings (`MONITOR_` prefix)
 
@@ -232,6 +295,19 @@ With Langfuse credentials set, each query creates a trace with spans for:
 - `generate` — LLM generation with model, token counts, and cost
 
 A circuit breaker (`MONITOR_CIRCUIT_BREAKER_THRESHOLD`) isolates Langfuse failures so a tracing outage never blocks query responses.
+
+### Self-Healing Observability
+
+Healed queries (`MonitoredRAGPipeline.query_with_healing`, or `.query(..., self_heal=True)`)
+get one span per healing step under the query trace — `retrieve_attempt_1`,
+`rerank_attempt_1`, `generate_attempt_1`, `verify_attempt_1`, `query_rewrite`,
+`retrieve_attempt_2`, … — with the verifier's decision (`passed`, `failure_type`,
+`reason`, scores) on each `verify_attempt_N` span.
+
+Healing metrics are exported to Prometheus (`/metrics`) and OTel:
+`rag.healing.attempts`, `rag.healing.success`, `rag.healing.failures{failure_type}`,
+`rag.healing.abstentions`, `rag.healing.query_rewrites`, `rag.healing.retrieval_retries`,
+`rag.healing.regenerations`, `rag.healing.latency` (Prometheus: `rag_healing_*`).
 
 ### Using the Monitored Pipeline
 
@@ -322,6 +398,17 @@ python scripts/evaluate.py --create-sample-dataset
 python scripts/evaluate.py --hybrid --reranker --fail-on-threshold --export-ci-summary
 ```
 
+**Self-healing evaluation** runs a hard dataset (vocabulary-mismatched paraphrases,
+terse and vague queries, multi-hop questions, and unanswerable questions) twice —
+healing off vs. on — and reports initial retrieval failure rate, healing success rate,
+average attempts, faithfulness/relevance before vs. after, citation validity,
+abstention rate (correct vs. false), false-positive healing, and latency overhead:
+
+```bash
+python scripts/evaluate.py --healing-report --hybrid
+python scripts/evaluate.py --self-heal --hybrid --reranker   # standard set with healing on
+```
+
 The `evaluate.yml` GitHub Actions workflow runs this gate on every push to `main` and posts results as a PR comment. The CI quality gate itself still keys off faithfulness only (unchanged threshold semantics); context precision/recall are reported alongside for visibility.
 
 ---
@@ -329,7 +416,7 @@ The `evaluate.yml` GitHub Actions workflow runs this gate on every push to `main
 ## Testing
 
 ```bash
-# Full suite (124 tests):
+# Full suite (239 tests):
 python -m pytest tests/ -v
 
 # With coverage report:
@@ -350,6 +437,10 @@ python -m pytest tests/test_monitoring.py -v
 | `test_monitoring.py` | Tracer spans, MetricsCollector, circuit breaker, guardrails |
 | `test_api.py` | FastAPI endpoints, auth, SSE streaming |
 | `test_chunker.py` | Recursive/fixed/sentence chunking strategies |
+| `test_healing_verifier.py` | Verifier deterministic checks, LLM-judge parsing/degradation, failure classifier |
+| `test_healing_routing.py` | State-machine routing, adaptive retrieval plans, query rewriting, repair prompts, healing metrics |
+| `test_healing_engine.py` | Retrieval/generation/citation repair, recovery, max retries, abstention, trace spans |
+| `test_healing_integration.py` | Healing through `RAGPipeline`, `/query`, `/query/stream` (SSE), `/metrics`, and monitoring |
 
 ---
 
@@ -372,8 +463,19 @@ production-grade-rag/
 │   │   └── citations.py        # Citation building and formatting
 │   ├── evaluation/
 │   │   ├── runner.py           # LLM-as-Judge evaluation runner
+│   │   ├── healing_eval.py     # Baseline vs. self-healing evaluation
 │   │   ├── scorer.py           # Faithfulness + relevance scorers
 │   │   └── dataset.py          # Golden JSONL dataset management
+│   ├── healing/
+│   │   ├── verifier.py         # Deterministic checks + LLM judge → VerificationResult
+│   │   ├── failure_classifier.py # Verifier signals → FailureType
+│   │   ├── query_rewriter.py   # LLM rewrite with deterministic fallback
+│   │   ├── adaptive_retrieval.py # Per-attempt retrieval plans, multi-query RRF
+│   │   ├── state_machine.py    # route() + HealingEngine loop, abstention
+│   │   ├── integration.py      # RAGPipeline backend adapter + factory
+│   │   ├── metrics.py          # rag.healing.* (Prometheus + OTel)
+│   │   ├── prompts.py          # Judge / rewrite / repair prompts
+│   │   └── types.py            # Pydantic models and enums
 │   ├── monitoring/
 │   │   ├── config.py           # MonitoringSettings (MONITOR_* env vars)
 │   │   ├── metrics.py          # OTel MetricsCollector
@@ -385,7 +487,7 @@ production-grade-rag/
 │   ├── config.py               # RAGSettings (RAG_* env vars, pydantic-settings)
 │   └── utils/
 │       └── i18n.py             # gettext internationalization helpers
-├── tests/                      # 124 pytest tests
+├── tests/                      # 239 pytest tests
 ├── scripts/
 │   ├── ingest.py               # CLI document ingestion
 │   ├── query.py                # CLI query (auto-routes to API if running)
@@ -435,7 +537,7 @@ This project showcases production AI/ML engineering across the full stack:
 | **Observability** | OpenTelemetry metrics, Langfuse distributed tracing, circuit breaker |
 | **LLM evaluation** | LLM-as-Judge, faithfulness + relevance metrics, golden dataset CI gate |
 | **Security engineering** | Auth, path traversal defense, safe file I/O, no pickle |
-| **Testing** | 124 tests, async patterns, mocking strategy, coverage reporting |
+| **Testing** | 239 tests, async patterns, mocking strategy, coverage reporting |
 | **DevOps / MLOps** | Docker multi-stage build, GitHub Actions CI/CD, GHCR publish |
 | **Multilingual NLP** | Language detection, per-language vector collections, i18n prompts |
 

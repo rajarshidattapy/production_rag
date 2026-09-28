@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
+    from src.healing.state_machine import HealingEngine, HealingObserver
+    from src.healing.types import HealingResult
     from src.retrieval.hybrid import HybridRetriever
     from src.retrieval.reranker import CrossEncoderReranker
 
@@ -98,6 +100,10 @@ class RAGPipeline:
         # Phase 2: Reranker (lazy-loaded)
         self._reranker: CrossEncoderReranker | None = None
 
+        # Phase 4: Self-healing engine (lazy-loaded; only built when healing is used)
+        self._healing_engine: HealingEngine | None = None
+        self._healing_observer: HealingObserver | None = None
+
     @property
     def vector_store(self) -> VectorStore:
         """The Chroma-backed vector store (defaulting to English for backward compatibility)."""
@@ -165,6 +171,7 @@ class RAGPipeline:
         top_k: int | None = None,
         use_hybrid: bool = False,
         use_reranker: bool = False,
+        self_heal: bool | None = None,
     ) -> tuple[str, list[Citation]]:
         """Answer a question using the RAG pipeline.
 
@@ -173,6 +180,9 @@ class RAGPipeline:
             top_k: Number of final context chunks (default: from config).
             use_hybrid: Enable BM25 + vector hybrid search (Phase 2).
             use_reranker: Enable cross-encoder re-ranking (Phase 2).
+            self_heal: Run the verify/repair loop (Phase 4). ``None`` uses
+                ``config.self_healing_enabled``. Use ``query_with_healing`` to
+                also get the healing metadata.
 
         Returns:
             Tuple of (answer_text, list_of_citations).
@@ -180,6 +190,12 @@ class RAGPipeline:
         Raises:
             ValueError: If the question is empty or exceeds the maximum length.
         """
+        if self._healing_requested(self_heal):
+            result = self.query_with_healing(
+                question, top_k=top_k, use_hybrid=use_hybrid, use_reranker=use_reranker
+            )
+            return result.answer, result.citations
+
         from src.utils.i18n import _, _current_translation
 
         lang = _detect_language(question)
@@ -231,6 +247,7 @@ class RAGPipeline:
         top_k: int | None = None,
         use_hybrid: bool = False,
         use_reranker: bool = False,
+        self_heal: bool | None = None,
     ) -> tuple[str, list[Citation]]:
         """Answer a question using the RAG pipeline asynchronously.
 
@@ -239,6 +256,8 @@ class RAGPipeline:
             top_k: Number of final context chunks (default: from config).
             use_hybrid: Enable BM25 + vector hybrid search (Phase 2).
             use_reranker: Enable cross-encoder re-ranking (Phase 2).
+            self_heal: Run the verify/repair loop (Phase 4). ``None`` uses
+                ``config.self_healing_enabled``.
 
         Returns:
             Tuple of (answer_text, list_of_citations).
@@ -246,6 +265,12 @@ class RAGPipeline:
         Raises:
             ValueError: If the question is empty or exceeds the maximum length.
         """
+        if self._healing_requested(self_heal):
+            result = await self.query_with_healing_async(
+                question, top_k=top_k, use_hybrid=use_hybrid, use_reranker=use_reranker
+            )
+            return result.answer, result.citations
+
         import asyncio
 
         from src.utils.i18n import _, _current_translation
@@ -300,6 +325,104 @@ class RAGPipeline:
             if token is not None:
                 _current_translation.reset(token)
 
+    # ------------------------------------------------------------------
+    # Self-healing query (Phase 4)
+    # ------------------------------------------------------------------
+
+    def _healing_requested(self, self_heal: bool | None) -> bool:
+        return self.config.self_healing_enabled if self_heal is None else self_heal
+
+    def _validate_question(self, question: str) -> str:
+        from src.utils.i18n import _
+
+        question = question.strip()
+        if not question:
+            raise ValueError(_("Question must not be empty."))
+        if len(question) > self.MAX_QUESTION_LENGTH:
+            raise ValueError(
+                _(
+                    "Question is too long ({len_question} chars). "
+                    "Maximum allowed is {max_len} characters."
+                ).format(len_question=len(question), max_len=self.MAX_QUESTION_LENGTH)
+            )
+        return question
+
+    def _get_healing_engine(self) -> HealingEngine:
+        with self._lock:
+            if self._healing_engine is None:
+                from src.healing.integration import build_healing_engine
+
+                self._healing_engine = build_healing_engine(self, observer=self._healing_observer)
+            return self._healing_engine
+
+    def set_healing_observer(self, observer: HealingObserver | None) -> None:
+        """Attach an observer that receives one span per healing step (used by monitoring)."""
+        with self._lock:
+            self._healing_observer = observer
+            if self._healing_engine is not None:
+                from src.healing.state_machine import NullObserver
+
+                self._healing_engine.observer = observer or NullObserver()
+
+    def query_with_healing(
+        self,
+        question: str,
+        top_k: int | None = None,
+        use_hybrid: bool = False,
+        use_reranker: bool = False,
+    ) -> HealingResult:
+        """Answer with the verify → diagnose → repair → re-verify loop, abstaining if it can't.
+
+        Returns:
+            A ``HealingResult`` with the answer, citations, healing metadata
+            (``.info``) and a per-attempt audit trail (``.history``).
+
+        Raises:
+            ValueError: If the question is empty or exceeds the maximum length.
+        """
+        from src.utils.i18n import _, _current_translation
+
+        lang = _detect_language(question)
+        token = _setup_translation(lang)
+        try:
+            question = self._validate_question(question)
+            result = self._get_healing_engine().run(
+                question,
+                lang=lang,
+                top_k=top_k or self.config.top_k_final,
+                use_hybrid=use_hybrid,
+                use_reranker=use_reranker,
+            )
+            if result.abstained:
+                result.answer = _(result.answer)
+            logger.info(
+                "Healing query finished: status=%s attempts=%d",
+                result.info.status,
+                result.info.attempts,
+            )
+            return result
+        finally:
+            if token is not None:
+                _current_translation.reset(token)
+
+    async def query_with_healing_async(
+        self,
+        question: str,
+        top_k: int | None = None,
+        use_hybrid: bool = False,
+        use_reranker: bool = False,
+    ) -> HealingResult:
+        """Async wrapper around ``query_with_healing`` (runs the loop in a worker thread)."""
+        import asyncio
+
+        return await asyncio.to_thread(
+            self.query_with_healing,
+            question,
+            top_k=top_k,
+            use_hybrid=use_hybrid,
+            use_reranker=use_reranker,
+        )
+
     def _retrieve(
         self,
         query: str,
@@ -307,17 +430,34 @@ class RAGPipeline:
         use_reranker: bool = False,
         k: int = 5,
         lang: str = "en",
+        fetch_k: int | None = None,
+        alpha: float | None = None,
     ) -> list[dict[str, Any]]:
-        """Retrieve relevant context chunks."""
-        fetch_k = self.config.top_k_retrieval if use_reranker else k
+        """Retrieve relevant context chunks.
+
+        ``fetch_k`` and ``alpha`` are optional overrides used by self-healing
+        retries (wider candidate pools, re-balanced hybrid fusion); the
+        defaults reproduce the original behaviour exactly.
+        """
+        if fetch_k is None:
+            fetch_k = self.config.top_k_retrieval if use_reranker else k
 
         if use_hybrid:
-            return self._get_hybrid_retriever(lang).search(query, k=fetch_k)
+            if alpha is None:
+                return self._get_hybrid_retriever(lang).search(query, k=fetch_k)
+            return self._get_hybrid_retriever(lang).search(query, k=fetch_k, alpha=alpha)
         return self._get_vector_store(lang).similarity_search(query, k=fetch_k)
 
-    def _apply_context_budget(self, contexts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Trim retrieved contexts so their combined text stays within ``config.max_context_chars``."""
-        budget = self.config.max_context_chars
+    def _apply_context_budget(
+        self, contexts: list[dict[str, Any]], budget: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Trim retrieved contexts so their combined text stays within the character budget.
+
+        ``budget`` defaults to ``config.max_context_chars``; self-healing passes
+        a larger one when a retry needs more context.
+        """
+        if budget is None:
+            budget = self.config.max_context_chars
         if budget <= 0:
             return contexts
 

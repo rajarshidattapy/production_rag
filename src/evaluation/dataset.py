@@ -18,6 +18,11 @@ class EvalExample:
     reference_answer: str
     expected_sources: list[str] = field(default_factory=list)
     id: str = ""
+    # Healing-evaluation fields (optional; ignored by the standard runner).
+    # expected_behavior: "answer" (answerable from the corpus) or "abstain"
+    # (not answerable — the correct outcome is a structured abstention).
+    expected_behavior: str = "answer"
+    category: str = ""
 
     def __post_init__(self) -> None:
         if not self.id:

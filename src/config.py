@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -67,8 +68,35 @@ class Settings(BaseSettings):
     llm_max_tokens: int = 1024
 
     # ---------- Evaluation (Phase 3) ----------
+    # Also used by the self-healing verifier as its faithfulness pass bar.
     faithfulness_threshold: float = 0.7
     eval_llm_model: str = "gpt-4o-mini"
+
+    # ---------- Self-healing (Phase 4) ----------
+    # Off by default so existing clients keep today's latency/cost profile;
+    # enable globally here or per request (`self_heal: true` on /query).
+    self_healing_enabled: bool = False
+    # Total generate→verify attempts per query, including the first (3 = up to 2 repairs).
+    max_healing_attempts: int = Field(default=3, ge=1, le=6)
+    # LLM-judge part of the verifier. Deterministic checks always run.
+    verifier_enabled: bool = True
+    verifier_llm_model: str | None = None  # defaults to llm_model
+    relevance_threshold: float = 0.7
+    # Floor for the top vector-similarity / cross-encoder score. Not applied to
+    # RRF scores, which are rank-derived rather than absolute.
+    min_retrieval_score: float = 0.2
+    # Fraction of the query's content terms that must appear in retrieved text.
+    min_query_coverage: float = 0.4
+    # Fraction of cited sentences that must lexically overlap their cited passage.
+    min_citation_support: float = 0.5
+    healing_llm_rewrite: bool = True
+    healing_fetch_k_multiplier: float = 2.0
+    healing_max_fetch_k: int = 100
+    healing_context_budget_multiplier: float = 1.5
+    healing_escalate_hybrid: bool = True
+    # Loading the cross-encoder is expensive; only turn it on during healing
+    # retries when explicitly allowed.
+    healing_rerank_on_retry: bool = False
 
     # ---------- Logging ----------
     log_level: str = "INFO"

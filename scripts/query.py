@@ -6,6 +6,7 @@ Usage:
     python scripts/query.py --question "How does hybrid search work?" --hybrid --reranker
     python scripts/query.py --question "..." --top-k 10 --no-citations
     python scripts/query.py --question "..." --provider anthropic
+    python scripts/query.py --question "..." --self-heal   # verify, repair, or abstain
 """
 
 from __future__ import annotations
@@ -47,12 +48,19 @@ def main() -> None:
         default=None,
         help="LLM provider override (default: from RAG_LLM_PROVIDER env var)",
     )
+    parser.add_argument(
+        "--self-heal",
+        action="store_true",
+        default=None,
+        help="Enable the self-healing verify/repair loop (default: RAG_SELF_HEALING_ENABLED)",
+    )
     args = parser.parse_args()
 
     # Try API query first to avoid model loading cold-start
     api_url = settings.api_url
     answer = None
     citations = []
+    healing: dict | None = None
 
     try:
         health_url = f"{api_url.rstrip('/')}/healthz"
@@ -72,6 +80,8 @@ def main() -> None:
                         "use_hybrid": args.hybrid,
                         "use_reranker": args.reranker,
                     }
+                    if args.self_heal is not None:
+                        payload["self_heal"] = args.self_heal
                     req = urllib.request.Request(
                         query_url,
                         data=json.dumps(payload).encode("utf-8"),
@@ -82,6 +92,7 @@ def main() -> None:
                         if q_resp.status == 200:
                             res_data = json.loads(q_resp.read().decode("utf-8"))
                             answer = res_data["answer"]
+                            healing = res_data.get("healing")
                             citations = [
                                 Citation(
                                     chunk_id=c["chunk_id"],
@@ -100,18 +111,38 @@ def main() -> None:
             "API server offline or query failed. Initialising local pipeline (this may take a few seconds)..."
         )
         pipeline = RAGPipeline(llm_provider=args.provider)
-        answer, citations = pipeline.query(
-            args.question,
-            top_k=args.top_k,
-            use_hybrid=args.hybrid,
-            use_reranker=args.reranker,
-        )
+        if pipeline._healing_requested(args.self_heal):
+            result = pipeline.query_with_healing(
+                args.question,
+                top_k=args.top_k,
+                use_hybrid=args.hybrid,
+                use_reranker=args.reranker,
+            )
+            answer, citations = result.answer, result.citations
+            healing = result.info.model_dump(mode="json")
+        else:
+            answer, citations = pipeline.query(
+                args.question,
+                top_k=args.top_k,
+                use_hybrid=args.hybrid,
+                use_reranker=args.reranker,
+                self_heal=False,
+            )
 
     # Display answer
     print("\n" + "=" * 60)
     print("ANSWER")
     print("=" * 60)
     print(answer)
+
+    if healing:
+        print("\n" + "-" * 60)
+        print(
+            f"Self-healing: {healing['status']} after {healing['attempts']} attempt(s)"
+            + (f" — reason: {healing['reason']}" if healing.get("reason") else "")
+        )
+        for q in healing.get("query_rewrites", []):
+            print(f"  rewrite: {q}")
 
     # Display citations
     if not args.no_citations and citations:
