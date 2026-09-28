@@ -1,0 +1,628 @@
+"""FastAPI application exposing the RAG pipeline as a long-lived HTTP service.
+
+Running this app keeps the embedding model and Chroma client warm in memory,
+avoiding the per-CLI-invocation cold start incurred by scripts/*.py.
+
+Run locally with:
+    uvicorn src.api.app:app --reload
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import secrets
+import time
+import uuid
+from collections import OrderedDict
+from collections.abc import AsyncGenerator
+from pathlib import Path
+from typing import Any
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    CollectorRegistry,
+    Counter,
+    Histogram,
+    generate_latest,
+)
+from pydantic import BaseModel, Field
+from starlette.middleware.base import BaseHTTPMiddleware
+
+from src.config import settings as _settings
+from src.generation.citations import CitationFormatter
+from src.pipeline import RAGPipeline
+from src.utils.i18n import _
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Optional API key authentication
+# ---------------------------------------------------------------------------
+_RAG_API_KEY = os.environ.get("RAG_API_KEY", "").strip()
+
+
+def _check_api_key(authorization: str | None = Header(None)) -> None:
+    """Dependency that enforces Bearer token auth when RAG_API_KEY is set."""
+    if not _RAG_API_KEY:
+        return  # Auth disabled — no key configured
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or malformed Authorization header.")
+    token = authorization[len("Bearer ") :]
+    # Constant-time comparison — a naive `!=` short-circuits on the first
+    # mismatched byte, leaking a timing side-channel that lets a remote
+    # attacker recover the key byte-by-byte across many requests.
+    if not secrets.compare_digest(token, _RAG_API_KEY):
+        raise HTTPException(status_code=403, detail="Invalid API key.")
+
+
+async def setup_locale(accept_language: str | None = Header(None)):
+    import gettext
+
+    from src.utils.i18n import _current_translation
+
+    lang = "en"
+    if accept_language:
+        parts = [p.split(";")[0].split("-")[0].strip().lower() for p in accept_language.split(",")]
+        for p in parts:
+            if p in ["de", "es", "en"]:
+                lang = p
+                break
+
+    try:
+        translation = gettext.translation(
+            domain="messages",
+            localedir=str(Path(__file__).parent.parent / "locale"),
+            languages=[lang],
+            fallback=True,
+        )
+    except Exception:
+        translation = gettext.NullTranslations()
+
+    token = _current_translation.set(translation)
+    try:
+        yield
+    finally:
+        _current_translation.reset(token)
+
+
+app = FastAPI(
+    title="Production RAG API",
+    version="1.1.0",
+    description="HTTP service layer for the Production-Grade RAG pipeline.",
+    dependencies=[Depends(setup_locale)],
+)
+
+# Applied per-route (not app-wide) so /healthz stays reachable without a
+# key — required for Docker/Kubernetes liveness probes, which never send
+# an Authorization header.
+_auth = Depends(_check_api_key)
+
+
+class _RequestIDMiddleware(BaseHTTPMiddleware):
+    """Propagate or generate a unique X-Request-ID for every request.
+
+    Enables distributed trace correlation across Langfuse, OTel, and logs.
+    The client may supply its own ID; we forward it unchanged, or generate
+    a UUID4 if absent.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        req_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = req_id
+        return response
+
+
+app.add_middleware(_RequestIDMiddleware)
+
+# ---------------------------------------------------------------------------
+# Prometheus metrics — pull-based scrape endpoint, independent of the
+# push-based OTel/Langfuse pipeline in src/monitoring/. A dedicated
+# registry (rather than the global default) keeps this isolated and
+# import-order-safe under repeated test-suite app construction.
+# ---------------------------------------------------------------------------
+_metrics_registry = CollectorRegistry()
+_http_requests_total = Counter(
+    "rag_http_requests_total",
+    "Total HTTP requests handled, by path and status code",
+    ["path", "method", "status_code"],
+    registry=_metrics_registry,
+)
+_http_request_duration_seconds = Histogram(
+    "rag_http_request_duration_seconds",
+    "HTTP request duration in seconds, by path",
+    ["path", "method"],
+    registry=_metrics_registry,
+)
+
+
+class _PrometheusMiddleware(BaseHTTPMiddleware):
+    """Record request count and latency for every request, keyed by route.
+
+    Uses the matched route template (e.g. ``/query``) rather than the raw
+    URL so the label cardinality stays bounded regardless of query params.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        start = time.perf_counter()
+        response = await call_next(request)
+        duration = time.perf_counter() - start
+
+        route = request.scope.get("route")
+        path = getattr(route, "path", request.url.path)
+
+        _http_requests_total.labels(
+            path=path, method=request.method, status_code=response.status_code
+        ).inc()
+        _http_request_duration_seconds.labels(path=path, method=request.method).observe(duration)
+        return response
+
+
+app.add_middleware(_PrometheusMiddleware)
+
+_cors_origins_raw = os.environ.get("RAG_CORS_ORIGINS", "*")
+_cors_origins: list[str] = (
+    ["*"]
+    if _cors_origins_raw.strip() == "*"
+    else [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Accept", "Accept-Language", "Content-Type"],
+)
+
+
+# --- OpenAI Exception Handlers ---
+try:
+    import openai
+
+    @app.exception_handler(openai.RateLimitError)
+    async def openai_rate_limit_handler(request: Request, exc: openai.RateLimitError):
+        return Response(
+            status_code=429,
+            content='{"detail": "Rate limit exceeded on upstream LLM provider API."}',
+            media_type="application/json",
+        )
+
+    @app.exception_handler(openai.APIConnectionError)
+    async def openai_connection_handler(request: Request, exc: openai.APIConnectionError):
+        return Response(
+            status_code=503,
+            content='{"detail": "Failed to connect to upstream LLM provider API."}',
+            media_type="application/json",
+        )
+
+    @app.exception_handler(openai.APIStatusError)
+    async def openai_status_handler(request: Request, exc: openai.APIStatusError):
+        status = 502
+        if exc.status_code == 429:
+            status = 429
+        return Response(
+            status_code=status,
+            content=f'{{"detail": "Upstream LLM provider returned error status: {exc.status_code}."}}',
+            media_type="application/json",
+        )
+except ImportError:
+    pass
+
+# --- Anthropic Exception Handlers ---
+try:
+    import anthropic
+
+    @app.exception_handler(anthropic.RateLimitError)
+    async def anthropic_rate_limit_handler(request: Request, exc: anthropic.RateLimitError):
+        return Response(
+            status_code=429,
+            content='{"detail": "Rate limit exceeded on upstream LLM provider API."}',
+            media_type="application/json",
+        )
+
+    @app.exception_handler(anthropic.APIConnectionError)
+    async def anthropic_connection_handler(request: Request, exc: anthropic.APIConnectionError):
+        return Response(
+            status_code=503,
+            content='{"detail": "Failed to connect to upstream LLM provider API."}',
+            media_type="application/json",
+        )
+
+    @app.exception_handler(anthropic.APIStatusError)
+    async def anthropic_status_handler(request: Request, exc: anthropic.APIStatusError):
+        status = 502
+        if exc.status_code == 429:
+            status = 429
+        return Response(
+            status_code=status,
+            content=f'{{"detail": "Upstream LLM provider returned error status: {exc.status_code}."}}',
+            media_type="application/json",
+        )
+except ImportError:
+    pass
+
+# Module-level singleton, constructed lazily on first use so that /healthz
+# does not force-load the embedding model or Chroma client.
+_pipeline: RAGPipeline | None = None
+
+
+def get_pipeline() -> RAGPipeline:
+    """Return the shared RAGPipeline instance, constructing it on first use."""
+    global _pipeline
+    if _pipeline is None:
+        _pipeline = RAGPipeline()
+    return _pipeline
+
+
+def reset_pipeline() -> None:
+    """Drop the cached pipeline singleton so it is rebuilt on next access.
+
+    Primarily useful for tests, where fixtures patch configuration (e.g.
+    ``settings.chroma_path``) after this module has already been imported.
+    """
+    global _pipeline
+    _pipeline = None
+
+
+class HealthResponse(BaseModel):
+    status: str
+
+
+class StatsResponse(BaseModel):
+    chunks_in_store: int
+    embedding_model: str
+    llm_provider: str
+    llm_model: str
+    chunk_size: int
+    chunk_overlap: int
+    embedding_cache_hits: int
+    embedding_cache_misses: int
+
+
+class IngestRequest(BaseModel):
+    source: str = Field(..., description="Path to a file or directory to ingest.")
+    reset: bool = Field(False, description="If true, clear the vector store before ingesting.")
+
+
+class IngestResponse(BaseModel):
+    chunks_ingested: int
+    total_chunks: int
+
+
+class IngestJobResponse(BaseModel):
+    job_id: str
+    status: str
+
+
+class IngestJobStatusResponse(BaseModel):
+    job_id: str
+    status: str
+    chunks_ingested: int | None = None
+    total_chunks: int | None = None
+    error: str | None = None
+
+
+class QueryRequest(BaseModel):
+    question: str
+    top_k: int | None = None
+    use_hybrid: bool = False
+    use_reranker: bool = False
+
+
+class CitationResponse(BaseModel):
+    chunk_id: str
+    source: str
+    filename: str
+    text_snippet: str
+    score: float
+
+
+class QueryResponse(BaseModel):
+    answer: str
+    citations: list[CitationResponse]
+
+
+@app.get("/healthz", response_model=HealthResponse)
+def healthz() -> HealthResponse:
+    """Lightweight liveness check that does not load heavy models."""
+    return HealthResponse(status="ok")
+
+
+@app.get("/readyz", response_model=HealthResponse, dependencies=[_auth])
+def readyz() -> HealthResponse:
+    """Readiness probe checking database access and eager-loading models."""
+    try:
+        # 1. Eagerly import heavy dependencies
+        import rank_bm25  # noqa: F401
+        import sentence_transformers  # noqa: F401
+
+        # 2. Warm up components for all supported languages
+        pipeline = get_pipeline()
+        for lang in ["en", "de", "es"]:
+            _ = pipeline._get_vector_store(lang)
+            _ = pipeline._get_hybrid_retriever(lang)
+        _ = pipeline._get_reranker()
+
+        return HealthResponse(status="ok")
+    except Exception as exc:
+        logger.warning("Readiness check failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Service not ready.",
+        ) from exc
+
+
+@app.get("/stats", response_model=StatsResponse, dependencies=[_auth])
+def stats() -> dict[str, Any]:
+    """Return pipeline statistics, constructing the pipeline if needed."""
+    pipeline = get_pipeline()
+    return pipeline.stats()
+
+
+@app.get("/metrics", dependencies=[_auth])
+def metrics() -> Response:
+    """Prometheus scrape endpoint: request counts and latency histograms by route."""
+    return Response(
+        content=generate_latest(_metrics_registry),
+        media_type=CONTENT_TYPE_LATEST,
+    )
+
+
+def _resolve_ingest_source(source: str) -> Path:
+    """Validate and resolve an ingest source path, confined to the data directory.
+
+    Shared by both the synchronous and async-job ingest endpoints so the
+    path-traversal guard can't drift between them. Raises HTTPException
+    (400) on any validation failure.
+    """
+    try:
+        source_path = Path(source).resolve(strict=False)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid path: {exc}") from exc
+
+    # Confine ingest paths to the configured data directory to prevent path-traversal.
+    allowed_root = Path(_settings.data_dir).resolve()
+    try:
+        source_path.relative_to(allowed_root)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Path must be inside the configured data directory ({allowed_root}).",
+        ) from None
+
+    if not source_path.exists():
+        raise HTTPException(
+            status_code=400,
+            detail=_("Source path does not exist: {source_path}").format(source_path=source),
+        )
+
+    return source_path
+
+
+@app.post("/ingest", response_model=IngestResponse, dependencies=[_auth])
+async def ingest(request: IngestRequest) -> IngestResponse:
+    """Ingest documents from a file or directory into the vector store.
+
+    Blocks for the full duration of ingestion. For large corpora that risk
+    client/proxy timeouts, use ``POST /ingest/async`` instead.
+    """
+    source_path = _resolve_ingest_source(request.source)
+    pipeline = get_pipeline()
+
+    if request.reset:
+        await asyncio.to_thread(pipeline.reset)
+
+    try:
+        chunks_ingested = await asyncio.to_thread(pipeline.ingest, source_path)
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    stats = await asyncio.to_thread(pipeline.stats)
+    total_chunks = stats["chunks_in_store"]
+    return IngestResponse(chunks_ingested=chunks_ingested, total_chunks=total_chunks)
+
+
+# ---------------------------------------------------------------------------
+# Async ingestion — job-ID + polling, for corpora large enough to risk a
+# client/proxy timeout on the synchronous /ingest endpoint above.
+# ---------------------------------------------------------------------------
+_INGEST_JOBS_MAX = 500
+_ingest_jobs: OrderedDict[str, dict[str, Any]] = OrderedDict()
+_background_ingest_tasks: set[asyncio.Task[None]] = set()
+
+
+def _record_ingest_job(job_id: str, **fields: Any) -> None:
+    _ingest_jobs[job_id] = {**_ingest_jobs.get(job_id, {}), **fields}
+    _ingest_jobs.move_to_end(job_id)
+    while len(_ingest_jobs) > _INGEST_JOBS_MAX:
+        _ingest_jobs.popitem(last=False)
+
+
+async def _run_ingest_job(job_id: str, source_path: Path, reset: bool) -> None:
+    _record_ingest_job(job_id, status="running")
+    try:
+        pipeline = get_pipeline()
+        if reset:
+            await asyncio.to_thread(pipeline.reset)
+        chunks_ingested = await asyncio.to_thread(pipeline.ingest, source_path)
+        stats = await asyncio.to_thread(pipeline.stats)
+        _record_ingest_job(
+            job_id,
+            status="completed",
+            chunks_ingested=chunks_ingested,
+            total_chunks=stats["chunks_in_store"],
+        )
+    except Exception as exc:
+        logger.warning("Ingest job %s failed: %s", job_id, exc)
+        _record_ingest_job(job_id, status="failed", error=str(exc))
+
+
+@app.post("/ingest/async", response_model=IngestJobResponse, status_code=202, dependencies=[_auth])
+async def ingest_async(request: IngestRequest) -> IngestJobResponse:
+    """Enqueue ingestion as a background job and return immediately.
+
+    Poll ``GET /ingest/jobs/{job_id}`` for status. Path validation happens
+    synchronously before the job is created, so a bad path still fails fast
+    with a 400 rather than surfacing as an async job failure.
+    """
+    source_path = _resolve_ingest_source(request.source)
+
+    job_id = str(uuid.uuid4())
+    _record_ingest_job(job_id, status="pending")
+
+    task = asyncio.create_task(_run_ingest_job(job_id, source_path, request.reset))
+    _background_ingest_tasks.add(task)
+    task.add_done_callback(_background_ingest_tasks.discard)
+
+    return IngestJobResponse(job_id=job_id, status="pending")
+
+
+@app.get("/ingest/jobs/{job_id}", response_model=IngestJobStatusResponse, dependencies=[_auth])
+def get_ingest_job(job_id: str) -> IngestJobStatusResponse:
+    """Return the current status of an async ingestion job."""
+    job = _ingest_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="No ingest job found with that ID.")
+    return IngestJobStatusResponse(job_id=job_id, **job)
+
+
+@app.post("/query", response_model=QueryResponse, dependencies=[_auth])
+async def query(request: QueryRequest, response: Response) -> QueryResponse:
+    """Answer a question using the RAG pipeline."""
+    from src.utils.usage import UsageTracker, request_usage
+
+    tracker = UsageTracker()
+    token = request_usage.set(tracker)
+
+    try:
+        pipeline = get_pipeline()
+
+        try:
+            answer, citations = await pipeline.query_async(
+                request.question,
+                top_k=request.top_k,
+                use_hybrid=request.use_hybrid,
+                use_reranker=request.use_reranker,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        citation_responses = [
+            CitationResponse(
+                chunk_id=c["chunk_id"],
+                source=c["source"],
+                filename=c["filename"],
+                text_snippet=c["text_snippet"],
+                score=c["score"],
+            )
+            for c in CitationFormatter.to_dict(citations)
+        ]
+
+        # Populate response headers with token usage metrics
+        response.headers["X-RAG-Prompt-Tokens"] = str(tracker.prompt_tokens)
+        response.headers["X-RAG-Completion-Tokens"] = str(tracker.completion_tokens)
+        response.headers["X-RAG-Total-Tokens"] = str(tracker.total_tokens)
+        response.headers["X-RAG-LLM-Latency-Sec"] = f"{tracker.total_latency:.4f}"
+
+        return QueryResponse(answer=answer, citations=citation_responses)
+    finally:
+        request_usage.reset(token)
+
+
+# ---------------------------------------------------------------------------
+# Streaming endpoint — Server-Sent Events
+# ---------------------------------------------------------------------------
+
+
+@app.post("/query/stream", dependencies=[_auth])
+async def query_stream(request: QueryRequest) -> StreamingResponse:
+    """Answer a question and stream tokens via Server-Sent Events (SSE).
+
+    Clients should connect with ``Accept: text/event-stream``.
+
+    Each SSE event is one of:
+    - ``data: {"token": "<text>"}``   — a generated text chunk
+    - ``data: {"citations": [...]}``   — final citation list (last event before DONE)
+    - ``data: [DONE]``                 — stream complete
+
+    Example (curl)::
+
+        curl -N -X POST http://localhost:8000/query/stream \\
+             -H 'Content-Type: application/json' \\
+             -d '{"question": "What is RAG?", "use_hybrid": true}'
+    """
+    pipeline = get_pipeline()
+
+    async def _event_stream() -> AsyncGenerator[str, None]:
+        try:
+            question = request.question.strip()
+            if not question:
+                yield f"data: {json.dumps({'error': 'Question must not be empty.'})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+            if len(question) > RAGPipeline.MAX_QUESTION_LENGTH:
+                yield f"data: {json.dumps({'error': 'Question exceeds maximum length.'})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+            k = request.top_k or _settings.top_k_final
+
+            # Retrieval runs in a thread (blocking I/O to ChromaDB / BM25)
+            contexts = await asyncio.to_thread(
+                pipeline._retrieve,
+                question,
+                use_hybrid=request.use_hybrid,
+                use_reranker=request.use_reranker,
+                k=k,
+            )
+
+            if not contexts:
+                no_context_msg = (
+                    "I could not find any relevant information in the knowledge "
+                    "base to answer your question."
+                )
+                yield f"data: {json.dumps({'token': no_context_msg})}\n\n"
+                yield f"data: {json.dumps({'citations': []})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+            if request.use_reranker:
+                contexts = await asyncio.to_thread(
+                    pipeline._apply_reranker, question, contexts, top_k=k
+                )
+
+            contexts = pipeline._apply_context_budget(contexts)
+
+            # Stream LLM tokens
+            async for chunk in pipeline.generator.generate_stream(question, contexts):
+                yield f"data: {json.dumps({'token': chunk})}\n\n"
+
+            # Emit citations as final structured event
+            citations = pipeline.citation_formatter.build_citations(contexts)
+            citation_dicts = CitationFormatter.to_dict(citations)
+            yield f"data: {json.dumps({'citations': citation_dicts})}\n\n"
+
+        except ValueError as exc:
+            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'error': 'Internal server error during streaming.'})}\n\n"
+            raise exc
+        finally:
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )

@@ -1,0 +1,43 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+]
+ignore = [
+    "E501",  # line length handled by ruff format
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+# Kept in sync with the newer of the two CI matrix versions (3.11, 3.12):
+# numpy's bundled .pyi stubs use PEP 695 `type` statements that mypy can
+# only parse when python_version >= 3.12, or stub loading hard-fails
+# before our own source is ever checked.
+python_version = "3.12"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+check_untyped_defs = true
+exclude = ["tests/", "build/"]
+
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+ignore_errors = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
