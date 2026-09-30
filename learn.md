@@ -32,3 +32,9 @@ Pipeline:
 Deployment:
 
 1) AWS sagemaker
+
+(Docker → CI/CD → AWS → Kubernetes)
+
+
+
+&nbsp;
