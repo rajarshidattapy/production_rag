@@ -49,7 +49,7 @@ def _setup_translation(lang: str) -> contextvars.Token | None:
     try:
         translation = gettext.translation(
             domain="messages",
-            localedir=str(Path(__file__).parent / "locale"),
+            localedir=str(Path(__file__).parent / "translator"),
             languages=[lang],
             fallback=True,
         )

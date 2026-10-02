@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from src.api import app as api_app
+from src import api as api_app
 from src.healing.metrics import healing_metrics
 from src.healing.state_machine import ABSTENTION_MESSAGE
 from src.pipeline import RAGPipeline

@@ -134,7 +134,7 @@ curl -N -X POST http://localhost:8000/query/stream \
 ### Run the API Server
 
 ```bash
-uvicorn src.api.app:app --reload --host 0.0.0.0 --port 8000
+uvicorn src.api:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ---
@@ -369,7 +369,7 @@ This project builds retrieval, fusion, reranking, and generation directly agains
 
 Notes on what changes as load grows, for anyone evaluating this as a production starting point:
 
-- **Horizontal scaling:** The FastAPI service is stateless aside from the lazily-constructed `RAGPipeline` singleton (`src/api/app.py`); running multiple replicas behind a load balancer works as-is. The one shared-state caveat is the in-process BM25 index cache (`HybridRetriever`) — each replica rebuilds its own copy from the persisted JSON index on first use.
+- **Horizontal scaling:** The FastAPI service is stateless aside from the lazily-constructed `RAGPipeline` singleton (`src/api.py`); running multiple replicas behind a load balancer works as-is. The one shared-state caveat is the in-process BM25 index cache (`HybridRetriever`) — each replica rebuilds its own copy from the persisted JSON index on first use.
 - **ChromaDB clustering:** The current setup uses a single ChromaDB instance (embedded or standalone via `docker-compose.yml`). At higher scale, Chroma's distributed mode or a managed vector DB (e.g. sharded by language collection, which this project already partitions by) is the natural next step — the per-language collection design in `src/pipeline.py` maps cleanly onto shard boundaries.
 - **Caching:** Repeated/paraphrased queries currently re-embed and re-retrieve from scratch every time. An embedding-result cache (see the improvement roadmap in `ANALYSIS_REPORT.md`) is the highest-leverage addition before adding more compute.
 - **Async ingestion:** Large ingestion jobs currently block the request for their full duration (see `ANALYSIS_REPORT.md` roadmap item D — job-ID + polling pattern) — needed before ingesting corpora large enough to risk proxy timeouts.

@@ -4,7 +4,7 @@ Running this app keeps the embedding model and Chroma client warm in memory,
 avoiding the per-CLI-invocation cold start incurred by scripts/*.py.
 
 Run locally with:
-    uvicorn src.api.app:app --reload
+    uvicorn src.api:app --reload
 """
 
 from __future__ import annotations
@@ -79,7 +79,7 @@ async def setup_locale(accept_language: str | None = Header(None)):
     try:
         translation = gettext.translation(
             domain="messages",
-            localedir=str(Path(__file__).parent.parent / "locale"),
+            localedir=str(Path(__file__).parent / "translator"),
             languages=[lang],
             fallback=True,
         )

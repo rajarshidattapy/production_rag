@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from src.api.app import app
+from src.api import app
 
 
 @pytest.fixture

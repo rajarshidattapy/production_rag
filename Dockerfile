@@ -65,4 +65,4 @@ HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=30s \
     CMD curl -sf http://localhost:8000/healthz || exit 1
 
 ENTRYPOINT ["python"]
-CMD ["-m", "uvicorn", "src.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["-m", "uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8000"]

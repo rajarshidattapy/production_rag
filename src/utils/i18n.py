@@ -36,7 +36,7 @@ def set_locale(lang: str) -> contextvars.Token:
 
     Returns a Token that can be used to restore the previous translation.
     """
-    localedir = Path(__file__).parent.parent / "locale"
+    localedir = Path(__file__).parent.parent / "translator"
     try:
         translation = gettext.translation(
             domain="messages",

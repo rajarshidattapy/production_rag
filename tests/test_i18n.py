@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from src.api.app import app
+from src.api import app
 from src.ingestion.chunker import Chunk
 from src.pipeline import RAGPipeline
 from src.utils.i18n import _, set_locale
@@ -20,7 +20,7 @@ def api_client() -> TestClient:
 
 def test_locale_compilation_exists() -> None:
     """Verify that compiled locales (.mo files) are present for de and es."""
-    locale_dir = Path(__file__).parent.parent / "src" / "locale"
+    locale_dir = Path(__file__).parent.parent / "src" / "translator"
     assert (locale_dir / "de" / "LC_MESSAGES" / "messages.mo").exists()
     assert (locale_dir / "es" / "LC_MESSAGES" / "messages.mo").exists()
     assert (locale_dir / "en" / "LC_MESSAGES" / "messages.mo").exists()

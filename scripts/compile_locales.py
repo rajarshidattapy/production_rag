@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Find and compile gettext translation catalogs (.po -> .mo).
 
-Runs `msgfmt` on all .po files under the src/locale directory.
+Runs `msgfmt` on all .po files under the src/translator directory.
 """
 
 import logging
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 def compile_locales() -> None:
-    locale_dir = Path(__file__).parent.parent / "src" / "locale"
+    locale_dir = Path(__file__).parent.parent / "src" / "translator"
     if not locale_dir.exists():
         logger.error("Locale directory not found at: %s", locale_dir)
         return

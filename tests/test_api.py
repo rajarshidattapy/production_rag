@@ -1,4 +1,4 @@
-"""Tests for the FastAPI HTTP service layer (src/api/app.py)."""
+"""Tests for the FastAPI HTTP service layer (src/api.py)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from src.api import app as api_app
+from src import api as api_app
 
 
 @pytest.fixture(autouse=True)
