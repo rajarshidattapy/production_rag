@@ -262,7 +262,7 @@ More tuning knobs (`RAG_HEALING_*`) are documented in [docs/SELF_HEALING.md](doc
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MONITOR_ENABLED` | `true` | Enable the monitoring subsystem |
+| `MONITOR_ENABLED` | `false` | Enable the monitoring subsystem; when `false` the rest of this table is ignored |
 | `MONITOR_LANGFUSE_SECRET_KEY` | — | Langfuse secret key (`sk-lf-…`) |
 | `MONITOR_LANGFUSE_PUBLIC_KEY` | — | Langfuse public key (`pk-lf-…`) |
 | `MONITOR_LANGFUSE_HOST` | `http://localhost:3000` | Langfuse server URL |

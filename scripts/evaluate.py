@@ -131,7 +131,10 @@ def main() -> None:
 
     # Run evaluation
     pipeline: Any = RAGPipeline()
-    if os.environ.get("MONITOR_ENABLED") == "true":
+    from src.monitoring.config import settings as monitoring_settings
+
+    # Imported lazily: src.monitoring.wrappers patches the LLM clients on import.
+    if monitoring_settings.enabled:
         from src.monitoring import MetricsCollector, MonitoredRAGPipeline, Tracer
 
         tracer = Tracer(enabled=True)

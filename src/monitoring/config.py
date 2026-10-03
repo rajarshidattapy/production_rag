@@ -19,7 +19,8 @@ class MonitoringSettings(BaseSettings):
         extra="ignore",
     )
 
-    enabled: bool = True
+    # Master switch: when False, nothing in src/monitoring/ is wired in.
+    enabled: bool = False
     langfuse_secret_key: str = ""
     langfuse_public_key: str = ""
     langfuse_host: str = "http://localhost:3000"
