@@ -5,7 +5,7 @@
 # Configuration
 pydantic>=2.13.5
 pydantic-settings>=2.15.0
-python-dotenv>=1.2.3
+python-dotenv>=1.2.4
 
 # Ingestion
 pypdf>=6.19.0                         # PDF document loading
@@ -18,15 +18,15 @@ sentence-transformers>=6.1.0         # Embedding models + cross-encoders
 rank-bm25>=0.2.2                     # BM25 keyword retrieval
 
 # Generation
-openai>=3.19.2                        # OpenAI LLM backend
-anthropic>=1.8.0                    # Anthropic LLM backend
+openai>=3.23.0                        # OpenAI LLM backend
+anthropic>=1.11.0                    # Anthropic LLM backend
 
 # Utilities
 tqdm>=4.70.1                         # Progress bars
 
 # API service
-fastapi>=0.141.1                     # HTTP API layer
-uvicorn[standard]>=0.53.0            # ASGI server
+fastapi>=0.142.2                     # HTTP API layer
+uvicorn[standard]>=0.54.0            # ASGI server
 langdetect>=1.0.9                    # Language detection for routing
 prometheus-client>=0.26.0            # /metrics scrape endpoint
 
@@ -34,6 +34,6 @@ pytest>=9.1.1
 pytest-cov>=7.1.0
 pytest-asyncio>=1.4.0
 httpx>=0.28.1
-ruff>=0.16.9
-mypy>=2.3.1
+ruff>=0.16.10
+mypy>=2.4.0
 
