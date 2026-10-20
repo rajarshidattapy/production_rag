@@ -572,7 +572,7 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 <details>
 
-  <summary>Click to show details</summary>
+  <summary>Show</summary>
 
 # Production-Grade RAG — Comprehensive Analysis &amp; Security Report
 
@@ -1107,13 +1107,12 @@ terse, vague, multi-hop, and unanswerable questions
 
 </details>
 
-## SELF HEALING
+## SELF Healing
 
-&nbsp;
 
 <details>
 
-<summary>Self Healing</summary>
+<summary>Show</summary>
 
 # Self-Healing RAG
 
