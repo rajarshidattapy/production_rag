@@ -38,13 +38,17 @@ class VectorStore:
         chroma_host: str | None = None,
         chroma_port: int | None = None,
         embedding_query_cache_size: int = 256,
+        ingest_batch_size: int = 2000,
     ) -> None:
+        if ingest_batch_size <= 0:
+            raise ValueError(f"ingest_batch_size must be positive, got {ingest_batch_size}")
         self.collection_name = collection_name
         self.persist_path = Path(persist_path) if persist_path else Path("data/chroma_db")
         self.embedding_model_name = embedding_model
         self.embedding_dim = embedding_dim
         self.chroma_host = chroma_host
         self.chroma_port = chroma_port
+        self.ingest_batch_size = ingest_batch_size
 
         # Lazy-load embedding function
         self._embedding_fn = _ChromaEmbeddingFunction(
@@ -131,10 +135,10 @@ class VectorStore:
         get_max = getattr(self._client, "get_max_batch_size", None)
         if callable(get_max):
             try:
-                return int(get_max())
+                return min(self.ingest_batch_size, int(get_max()))
             except Exception:
                 logger.debug("get_max_batch_size() failed, using default", exc_info=True)
-        return self.DEFAULT_MAX_BATCH_SIZE
+        return self.ingest_batch_size
 
     def count(self) -> int:
         """Return the number of chunks in the collection."""

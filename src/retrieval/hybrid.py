@@ -26,15 +26,19 @@ class HybridRetriever:
         alpha: float = 0.6,
         rrf_k: int = 60,
         persist_path: str | Path | None = None,
+        max_index_mb: int = 500,
     ) -> None:
         if not 0.0 <= alpha <= 1.0:
             raise ValueError(f"alpha must be in [0, 1], got {alpha}")
         if rrf_k <= 0:
             raise ValueError(f"rrf_k must be positive, got {rrf_k}")
+        if max_index_mb <= 0:
+            raise ValueError(f"max_index_mb must be positive, got {max_index_mb}")
 
         self.vector_store = vector_store
         self.alpha = alpha
         self.rrf_k = rrf_k
+        self._max_index_bytes = max_index_mb * 1024 * 1024
         self.persist_path = (
             Path(persist_path)
             if persist_path
@@ -119,12 +123,20 @@ class HybridRetriever:
             fd = os.open(self.persist_path, flags, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(state, f, ensure_ascii=False)
+            size = self.persist_path.stat().st_size
+            if size > self._max_index_bytes:
+                # A file we would refuse to load is just wasted disk and a rebuild per restart.
+                self.persist_path.unlink()
+                logger.warning(
+                    "BM25 corpus is %.0f MB, over the %d MB limit — not persisted. "
+                    "Raise RAG_BM25_MAX_INDEX_MB or use use_hybrid=false.",
+                    size / (1024 * 1024),
+                    self._max_index_bytes // (1024 * 1024),
+                )
+                return
             logger.info("Saved BM25 corpus to %s", self.persist_path)
         except Exception:
             logger.exception("Failed to save BM25 corpus to %s", self.persist_path)
-
-    # Maximum size in bytes we are willing to load from disk (500 MB).
-    _MAX_INDEX_FILE_BYTES = 500 * 1024 * 1024
 
     def _load_index(self) -> bool:
         """Load BM25 corpus from disk and rebuild the index. Returns True on success."""
@@ -136,12 +148,12 @@ class HybridRetriever:
             file_size = self.persist_path.stat().st_size
         except OSError:
             return False
-        if file_size > self._MAX_INDEX_FILE_BYTES:
+        if file_size > self._max_index_bytes:
             logger.warning(
-                "BM25 index file %s is %.0f MB, exceeding the %d MB safety limit — skipping disk load",
+                "BM25 index file %s is %.0f MB, exceeding the %d MB limit (RAG_BM25_MAX_INDEX_MB) — skipping disk load",
                 self.persist_path,
                 file_size / (1024 * 1024),
-                self._MAX_INDEX_FILE_BYTES // (1024 * 1024),
+                self._max_index_bytes // (1024 * 1024),
             )
             return False
 

@@ -53,10 +53,14 @@ class Settings(BaseSettings):
     top_k_retrieval: int = 20
     top_k_rerank: int = 5
     top_k_final: int = 5
+    # Upper bound for each Chroma add() call during ingestion. The effective
+    # value is also capped by Chroma's own advertised maximum.
+    ingest_batch_size: int = Field(default=2000, ge=1)
 
     # Hybrid search (Phase 2)
     hybrid_alpha: float = 0.6  # weight for vector search (1.0 = pure vector, 0.0 = pure BM25)
     rrf_k: int = 60  # constant for Reciprocal Rank Fusion
+    bm25_max_index_mb: int = 500  # max BM25 corpus file persisted/loaded; raise for ~1M-chunk corpora
 
     # ---------- Re-ranker (Phase 2) ----------
     reranker_model: str = "BAAI/bge-reranker-large"

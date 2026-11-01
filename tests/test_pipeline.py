@@ -308,6 +308,7 @@ class TestRAGPipeline:
         from src.generation.llm_client import LLMClient
 
         monkeypatch.setenv("OPENAI_API_KEY", "sk-native-example")
+        monkeypatch.setenv("RAG_OPENROUTER_MODE", "auto")
         client = LLMClient(model="gpt-4o-mini")
 
         assert client.openai_client_kwargs() == {"api_key": "sk-native-example"}

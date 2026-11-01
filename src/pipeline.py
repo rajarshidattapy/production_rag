@@ -122,6 +122,7 @@ class RAGPipeline:
                     chroma_host=self.config.chroma_host,
                     chroma_port=self.config.chroma_port,
                     embedding_query_cache_size=self.config.embedding_query_cache_size,
+                    ingest_batch_size=self.config.ingest_batch_size,
                 )
             return self._vector_stores[lang]
 
@@ -503,6 +504,7 @@ class RAGPipeline:
                     vector_store=self._get_vector_store(lang),
                     alpha=self.config.hybrid_alpha,
                     rrf_k=self.config.rrf_k,
+                    max_index_mb=self.config.bm25_max_index_mb,
                 )
                 self._hybrid_retrievers[lang].build_index()
             return self._hybrid_retrievers[lang]

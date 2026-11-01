@@ -243,6 +243,7 @@ All settings use the `RAG_` prefix and can be set via `.env` or environment vari
 | `RAG_TOP_K_RETRIEVAL`            | `20`                                   | Candidates fetched before reranking                         |
 | `RAG_TOP_K_FINAL`                | `5`                                    | Final context chunks passed to the LLM                      |
 | `RAG_HYBRID_ALPHA`               | `0.6`                                  | RRF weight: 1.0 = pure vector, 0.0 = pure BM25              |
+| `RAG_BM25_MAX_INDEX_MB`          | `500`                                  | Max BM25 corpus file persisted/loaded (raise for ~1M chunks) |
 | `RAG_EMBEDDING_QUERY_CACHE_SIZE` | `256`                                  | LRU cache size for repeated query embeddings (`0` disables) |
 | `RAG_RERANKER_MODEL`             | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder model                                         |
 | `RAG_FAITHFULNESS_THRESHOLD`     | `0.7`                                  | Minimum faithfulness score for CI gate                      |

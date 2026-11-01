@@ -2,10 +2,6 @@
 
 
 
-chatgpt like UI
-
-
-
 Refer to:
 
 1. fastgraph rag by ms: [https://github.com/microsoft/graphrag](https://github.com/microsoft/graphrag)
@@ -13,6 +9,12 @@ Refer to:
 Notes:
 
 
+
+- in future chroma might be bottleneck, since it has single instance, need a dedicated vector db like pinecone or qdrant, or ofc: chromadb pro
+
+
+
+&nbsp;
 
 20 million docs, but can't sent to LLM: (cost, latency) - knowledge graph
 
