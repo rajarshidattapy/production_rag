@@ -725,7 +725,12 @@ class MonitoredRAGPipeline:
             if prov == "openai":
                 from openai import OpenAI
 
-                client = OpenAI(timeout=60.0)
+                from src.generation.llm_client import LLMClient
+
+                client = OpenAI(
+                    timeout=60.0,
+                    **LLMClient(provider="openai", model=mdl, timeout=60.0).openai_client_kwargs(),
+                )
                 res = client.chat.completions.create(
                     model=mdl,
                     messages=[

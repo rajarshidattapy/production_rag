@@ -7,9 +7,55 @@ duplicated across ``Generator``, ``FaithfulnessScorer``, and
 
 from __future__ import annotations
 
+import os
 from typing import Literal
 
 from src.utils.retry import async_retry_with_backoff, retry_with_backoff
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+
+def _openai_api_key() -> str:
+    """Get the key from the process environment or the application's .env file."""
+    if key := os.getenv("OPENAI_API_KEY"):
+        return key
+
+    # Settings reads .env itself.  Import lazily to keep this client usable in
+    # small scripts that do not otherwise need the application configuration.
+    from src.config import settings
+
+    return settings.openai_api_key or ""
+
+
+def _openrouter_mode() -> str:
+    """Read the routing override from the environment or application's .env."""
+    if mode := os.getenv("RAG_OPENROUTER_MODE"):
+        return mode
+
+    from src.config import settings
+
+    return settings.openrouter_mode
+
+
+def uses_openrouter(model: str) -> bool:
+    """Return whether an OpenAI-compatible model name targets OpenRouter.
+
+    OpenRouter model IDs are provider-qualified (for example,
+    ``nvidia/nemotron-3-ultra-550b-a55b:free`` or ``openai/gpt-4o``), while
+    native OpenAI model IDs are not.  An OpenRouter key is also unambiguous and
+    lets callers use an OpenRouter alias that does not contain a slash.
+
+    ``RAG_OPENROUTER_MODE`` may be set to ``true`` or ``false`` to override
+    automatic detection; its default is ``auto``.
+    """
+    mode = _openrouter_mode().strip().lower()
+    if mode in {"true", "1", "yes", "on"}:
+        return True
+    if mode in {"false", "0", "no", "off"}:
+        return False
+
+    api_key = _openai_api_key()
+    return api_key.startswith("sk-or-") or "/" in model.strip()
 
 
 class LLMClient:
@@ -30,6 +76,20 @@ class LLMClient:
         self.provider = provider
         self.model = model
         self.timeout = timeout
+
+    def openai_client_kwargs(self) -> dict[str, object]:
+        """Connection options for the OpenAI SDK.
+
+        The application reads ``OPENAI_API_KEY`` in both cases. Only the base
+        URL changes for OpenRouter, so users can switch providers by changing
+        ``RAG_LLM_MODEL`` without renaming their key variable.
+        """
+        options: dict[str, object] = {}
+        if api_key := _openai_api_key():
+            options["api_key"] = api_key
+        if self.provider == "openai" and uses_openrouter(self.model):
+            options["base_url"] = OPENROUTER_BASE_URL
+        return options
 
     def complete(
         self,
@@ -100,7 +160,7 @@ class LLMClient:
         except ImportError:
             raise ImportError("openai package required. Install with: pip install openai") from None
 
-        client = OpenAI(timeout=self.timeout)
+        client = OpenAI(timeout=self.timeout, **self.openai_client_kwargs())
         messages: list[ChatCompletionMessageParam] = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -186,7 +246,7 @@ class LLMClient:
         except ImportError:
             raise ImportError("openai package required. Install with: pip install openai") from None
 
-        client = AsyncOpenAI(timeout=self.timeout)
+        client = AsyncOpenAI(timeout=self.timeout, **self.openai_client_kwargs())
         messages: list[ChatCompletionMessageParam] = []
         if system:
             messages.append({"role": "system", "content": system})

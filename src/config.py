@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     reranker_model: str = "BAAI/bge-reranker-large"
 
     # ---------- LLM ----------
+    # Deliberately uses the conventional, un-prefixed variable so the OpenAI
+    # SDK and other tooling can share the same .env file.
+    openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY", repr=False)
+    openrouter_mode: str = "auto"
     llm_provider: Literal["openai", "anthropic"] = "openai"
     llm_model: str = "gpt-4o-mini"
     llm_temperature: float = 0.0

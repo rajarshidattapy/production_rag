@@ -136,7 +136,9 @@ class Generator:
         except ImportError:
             raise ImportError("openai package required. Install with: pip install openai") from None
 
-        client = AsyncOpenAI(timeout=self._client.timeout)
+        client = AsyncOpenAI(
+            timeout=self._client.timeout, **self._client.openai_client_kwargs()
+        )
         messages: list[Any] = [
             {"role": "system", "content": system},
             {"role": "user", "content": prompt},

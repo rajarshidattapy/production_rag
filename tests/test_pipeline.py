@@ -290,3 +290,24 @@ class TestRAGPipeline:
             res = await client.complete_async("hello")
             assert res == "Async Success."
             mock_openai.chat.completions.create.assert_called_once()
+
+    def test_openrouter_model_uses_openrouter_endpoint(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A provider-qualified model uses OpenRouter with OPENAI_API_KEY."""
+        from src.generation.llm_client import OPENROUTER_BASE_URL, LLMClient
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-or-v1-example")
+        client = LLMClient(model="nvidia/nemotron-3-ultra-550b-a55b:free")
+
+        assert client.openai_client_kwargs() == {
+            "api_key": "sk-or-v1-example",
+            "base_url": OPENROUTER_BASE_URL,
+        }
+
+    def test_openai_model_keeps_openai_endpoint(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An unqualified model with a native key keeps the OpenAI default URL."""
+        from src.generation.llm_client import LLMClient
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-native-example")
+        client = LLMClient(model="gpt-4o-mini")
+
+        assert client.openai_client_kwargs() == {"api_key": "sk-native-example"}
