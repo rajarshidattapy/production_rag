@@ -386,7 +386,6 @@ def readyz() -> HealthResponse:
     """Readiness probe checking database access and eager-loading models."""
     try:
         # 1. Eagerly import heavy dependencies
-        import rank_bm25  # noqa: F401
         import sentence_transformers  # noqa: F401
 
         # 2. Warm up components for all supported languages

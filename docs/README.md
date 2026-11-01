@@ -61,7 +61,7 @@ types, repair strategies, metrics, and limitations.
 ## Features
 
 - **Self-Healing Answers (opt-in)** — A verifier checks every answer (citation range and support, retrieval sufficiency, refusal detection, then an LLM judge for faithfulness, relevance, and unresolved contradictions). Failures are diagnosed deterministically into retrieval / query / context / generation / citation failures and repaired accordingly — query rewrite with adapted hybrid retrieval, context expansion, or regeneration with a repair prompt — then re-verified. After `RAG_MAX_HEALING_ATTEMPTS` the service returns a structured abstention instead of an unverified answer. Enable with `RAG_SELF_HEALING_ENABLED=true` or `"self_heal": true` per request.
-- **Hybrid Search** — BM25 (rank-bm25) + ChromaDB vector similarity fused with Reciprocal Rank Fusion (RRF). Alpha controls the balance; the corpus index persists to disk with 0o600 permissions and a 500 MB safety guard.
+- **Hybrid Search** — BM25 (built-in inverted index, numpy only) + ChromaDB vector similarity fused with Reciprocal Rank Fusion (RRF). Alpha controls the balance. The BM25 side holds only chunk IDs and term postings (~1.2 KB per chunk) and fetches hit text from the vector store; ingests append to an on-disk journal, and restarts load the index in well under a second. It persists with 0o600 permissions and a size safety guard.
 - **Query Embedding Cache** — An in-process LRU cache (`RAG_EMBEDDING_QUERY_CACHE_SIZE`, default 256) avoids re-running the embedding model for repeated/paraphrased queries — common in eval runs and demos. Cache hit/miss counts are exposed via `/stats` and `/metrics`.
 - **Cross-Encoder Reranking** — `BAAI/bge-reranker-large` (configurable) reorders retrieved chunks for maximum relevance before generation.
 - **Multilingual Routing** — `langdetect` identifies the query language; documents are sharded into per-language ChromaDB collections (en/de/es) with language-appropriate prompts via gettext.
@@ -75,7 +75,7 @@ types, repair strategies, metrics, and limitations.
 - **LLM-as-Judge Evaluation** — All four RAGAS-style quality dimensions via `gpt-4o-mini` against a golden JSONL dataset, with CI quality gate (`--fail-on-threshold`): faithfulness, answer relevance, context precision (Average Precision @ k — are retrieved chunks relevant, ranked well?), and context recall (are reference-answer statements attributable to the retrieved context?).
 - **X-Request-ID Correlation** — Middleware echoes or generates a `X-Request-ID` header on every response for distributed trace correlation.
 - **Context Budget Management** — Configurable `max_context_chars` trims retrieved chunks to fit within the LLM context window without truncating mid-sentence.
-- **Security Hardening** — Path-traversal guards on `/ingest`, BM25 index serialized as JSON (not pickle), 0o600 file permissions on data files, `re.escape()` on pricing pattern matching to prevent ReDoS.
+- **Security Hardening** — Path-traversal guards on `/ingest`, BM25 index stored as plain integer arrays loaded with `allow_pickle=False` (no pickle), 0o600 file permissions on data files, `re.escape()` on pricing pattern matching to prevent ReDoS.
 - **Docker Multi-Stage Build** — `deps → model-cache → runtime` stages; non-root user, no model download at container start.
 - **239 Tests, 3 CI Workflows** — Unit + integration tests with coverage (LLM calls mocked; no API keys needed), automatic quality gate evaluation, and GHCR Docker publish on release.
 
@@ -243,7 +243,10 @@ All settings use the `RAG_` prefix and can be set via `.env` or environment vari
 | `RAG_TOP_K_RETRIEVAL`            | `20`                                   | Candidates fetched before reranking                         |
 | `RAG_TOP_K_FINAL`                | `5`                                    | Final context chunks passed to the LLM                      |
 | `RAG_HYBRID_ALPHA`               | `0.6`                                  | RRF weight: 1.0 = pure vector, 0.0 = pure BM25              |
-| `RAG_BM25_MAX_INDEX_MB`          | `500`                                  | Max BM25 corpus file persisted/loaded (raise for ~1M chunks) |
+| `RAG_HNSW_EF_SEARCH`             | `200`                                  | HNSW search breadth: higher = better recall, same latency up to ~200 |
+| `RAG_HNSW_MAX_NEIGHBORS`         | `16`                                   | HNSW graph degree M (new collections only; 32 adds ~20% build time) |
+| `RAG_HNSW_EF_CONSTRUCTION`       | `100`                                  | HNSW build breadth (new collections only)                   |
+| `RAG_BM25_MAX_INDEX_MB`          | `500`                                  | Max BM25 index file persisted/loaded (~1 KB/chunk; use ~2000 for 1M chunks) |
 | `RAG_EMBEDDING_QUERY_CACHE_SIZE` | `256`                                  | LRU cache size for repeated query embeddings (`0` disables) |
 | `RAG_RERANKER_MODEL`             | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder model                                         |
 | `RAG_FAITHFULNESS_THRESHOLD`     | `0.7`                                  | Minimum faithfulness score for CI gate                      |
@@ -372,7 +375,7 @@ docker run -p 8000:8000 \
 
 ## Why Not LangChain?
 
-This project builds retrieval, fusion, reranking, and generation directly against `chromadb`, `rank-bm25`, and the OpenAI/Anthropic SDKs instead of a framework. The tradeoffs, deliberately:
+This project builds retrieval, fusion, reranking, and generation directly against `chromadb`, a small in-repo BM25 implementation, and the OpenAI/Anthropic SDKs instead of a framework. The tradeoffs, deliberately:
 
 - **Every retrieval decision is explicit and testable.** RRF fusion (`src/retrieval/hybrid.py`) and context-budget trimming (`src/pipeline.py`) are plain functions with unit tests — not framework internals to work around when they don't fit a use case.
 - **Fewer version-compatibility surprises.** Framework abstraction layers add a dependency-resolution axis (framework version × provider SDK version × vector-store client version) that has historically been a common source of breakage in LangChain-based projects.
@@ -529,10 +532,10 @@ production-grade-rag/
 
 - **API authentication** — `RAG_API_KEY` enables Bearer token auth on all endpoints, checked with a constant-time comparison (`secrets.compare_digest`) to prevent timing-based key recovery.
 - **Path traversal protection** — `/ingest` resolves symlinks and validates the source path is contained within the configured data directory before file access.
-- **No pickle** — BM25 corpus persists as JSON; no `pickle.load()` anywhere in the codebase.
+- **No pickle** — the BM25 index persists as plain integer arrays (`np.load(..., allow_pickle=False)`); no `pickle.load()` anywhere in the codebase.
 - **File permissions** — Sensitive data files (BM25 index, metrics export) are written with `os.open(..., 0o600)`.
 - **ReDoS prevention** — Pricing key patterns use `re.escape()` before regex compilation.
-- **OOM guard** — BM25 index loader rejects files exceeding 500 MB.
+- **OOM guard** — BM25 index loader rejects files exceeding `RAG_BM25_MAX_INDEX_MB` (default 500 MB).
 - **Secret hygiene** — No partial key logging; keys validated structurally, not compared in logs.
 - **No internal error leakage** — Readiness/health failures are logged server-side; clients receive a generic status message.
 - **CORS** — `RAG_CORS_ORIGINS` restricts cross-origin access; defaults to `*` for local development only.
@@ -891,14 +894,14 @@ Note: this only affects the `docker-compose` networked deployment. The default l
 
 ### Clean — areas re-checked, no issues found
 
-Path-traversal guard (symlink-resolution-safe), SSE event-stream injection, LLM-client SSRF (no configurable base\_url), pickle/eval/deserialization use (none — BM25 index is JSON-only), `scripts/*.py` subprocess usage (argument-list only, no `shell=True`), Dockerfile (non-root UID 1001, no baked-in secrets), and a repo-wide secret/high-entropy/PEM-header scan across all tracked files (no matches).
+Path-traversal guard (symlink-resolution-safe), SSE event-stream injection, LLM-client SSRF (no configurable base\_url), pickle/eval/deserialization use (none — the BM25 index is loaded with `allow_pickle=False`), `scripts/*.py` subprocess usage (argument-list only, no `shell=True`), Dockerfile (non-root UID 1001, no baked-in secrets), and a repo-wide secret/high-entropy/PEM-header scan across all tracked files (no matches).
 
 ## 2. Dependency &amp; Supply-Chain / "Malware Analysis" Findings
 
 Framing note: this is a first-party, source-available Python project with no compiled binaries, obfuscated code, or third-party executables — there is no malware to reverse-engineer in the traditional sense. The applicable equivalent for a project like this is **supply-chain provenance**: verifying every dependency is a legitimate package, free of known CVEs, and pinned against tampering. That's what was actually run:
 
 - `pip-audit` was run against `requirements.txt` + `requirements-dev.txt` in an isolated scratch venv (the project's own `.venv` had no `pip`/packages installed — flagged separately below). Result: **one real finding — the chromadb CVE above (Finding #13)**. No other declared dependency or its resolved transitive tree returned any known advisory.
-- **Typosquatting check:** every declared package name (`pydantic`, `fastapi`, `chromadb`, `sentence-transformers`, `rank-bm25`, `openai`, `anthropic`, `langdetect`, `httpx`, etc.) is a legitimate, correctly-spelled, well-known PyPI project. No typosquatting indicators; none has a history of a compromised-version supply-chain incident.
+- **Typosquatting check:** every declared package name (`pydantic`, `fastapi`, `chromadb`, `sentence-transformers`, `openai`, `anthropic`, `langdetect`, `httpx`, etc.) is a legitimate, correctly-spelled, well-known PyPI project. No typosquatting indicators; none has a history of a compromised-version supply-chain incident.
 - **Lockfile / pinning strategy (concrete remediation for prior Finding #10):**
   ```bash
   pip install pip-tools

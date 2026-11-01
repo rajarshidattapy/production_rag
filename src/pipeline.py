@@ -122,6 +122,9 @@ class RAGPipeline:
                     chroma_host=self.config.chroma_host,
                     chroma_port=self.config.chroma_port,
                     embedding_query_cache_size=self.config.embedding_query_cache_size,
+                    hnsw_ef_search=self.config.hnsw_ef_search,
+                    hnsw_max_neighbors=self.config.hnsw_max_neighbors,
+                    hnsw_ef_construction=self.config.hnsw_ef_construction,
                     ingest_batch_size=self.config.ingest_batch_size,
                 )
             return self._vector_stores[lang]
@@ -155,9 +158,9 @@ class RAGPipeline:
             count = vs.add_chunks(lang_chunks)
             total_count += count
 
-            # Invalidate corresponding hybrid index
+            # Keep the corresponding hybrid index current (appends; falls back to a rebuild)
             if lang in self._hybrid_retrievers:
-                self._hybrid_retrievers[lang].invalidate_index()
+                self._hybrid_retrievers[lang].add_chunks(lang_chunks)
 
         logger.info("Ingested %d chunks from %s", total_count, source)
         return total_count
@@ -506,7 +509,10 @@ class RAGPipeline:
                     rrf_k=self.config.rrf_k,
                     max_index_mb=self.config.bm25_max_index_mb,
                 )
-                self._hybrid_retrievers[lang].build_index()
+                retriever = self._hybrid_retrievers[lang]
+                # Reuse the persisted BM25 corpus when present; rebuild only if missing/unloadable.
+                if not retriever._load_index():
+                    retriever.build_index()
             return self._hybrid_retrievers[lang]
 
     def _get_reranker(self) -> CrossEncoderReranker:

@@ -206,6 +206,15 @@ class TestQueryEmbeddingCache:
         assert calls == [["what is rag?"]]  # only encoded once
         assert fn.cache_stats() == {"hits": 1, "misses": 1, "size": 1}
 
+    def test_embeddings_are_numpy_arrays_for_server_mode(self) -> None:
+        """Chroma's HttpClient calls .tolist() on embeddings; plain lists break server mode."""
+        import numpy as np
+
+        for cache_size in (0, 8):
+            fn, _ = self._make_fn(cache_size=cache_size)
+            for vectors in (fn.embed_query(["q"]), fn.embed_document(["d"]), fn(["d"])):
+                assert all(isinstance(v, np.ndarray) and v.dtype == np.float32 for v in vectors)
+
     def test_distinct_queries_are_cache_misses(self) -> None:
         fn, calls = self._make_fn()
 
@@ -360,6 +369,131 @@ class TestReranker:
         # Search should trigger auto-rebuild
         hybrid.search("BM25 auto-rebuild", k=3)
         assert len(hybrid._corpus_ids) == initial_length + 1
+
+    def test_hybrid_incremental_add_matches_full_rebuild(self, indexed_store: VectorStore) -> None:
+        """Appending chunks must give the same BM25 results as rebuilding from scratch."""
+        from src.retrieval.hybrid import HybridRetriever
+
+        live = HybridRetriever(indexed_store, alpha=0.6)
+        live.build_index()
+
+        new_chunks = Chunker(chunk_size=200, chunk_overlap=20).chunk_many(
+            [
+                Document(
+                    content="Sparse retrieval with BM25 ranks keyword matches by term frequency.",
+                    metadata={"source": "n1.txt", "filename": "n1.txt", "page": 3},
+                    doc_id="n1",
+                ),
+                Document(
+                    content="Dense retrieval embeds queries and documents into one vector space.",
+                    metadata={"source": "n2.txt", "filename": "n2.txt"},
+                    doc_id="n2",
+                ),
+            ]
+        )
+        indexed_store.add_chunks(new_chunks)
+        assert live.add_chunks(new_chunks) is True
+        assert live.add_chunks(new_chunks) is True  # re-adding known IDs is a no-op
+        assert len(live._corpus_ids) == indexed_store.count()
+
+        fresh = HybridRetriever(
+            indexed_store, alpha=0.6, persist_path=live.persist_path.parent / "fresh.json"
+        )
+        fresh.build_index()
+
+        for query in ["BM25 keyword term frequency", "vector space embeds", "RAG generation"]:
+            a = live._bm25_search(query, k=5)
+            b = fresh._bm25_search(query, k=5)
+            assert [r["id"] for r in a] == [r["id"] for r in b]
+            assert [r["score"] for r in a] == [r["score"] for r in b]
+            # Metadata is stringified like Chroma's, so results are identical either way.
+            assert [r["metadata"] for r in a] == [r["metadata"] for r in b]
+
+    def test_hybrid_add_chunks_without_index_invalidates(self, indexed_store: VectorStore) -> None:
+        """With no live index there is nothing to append to; fall back to a lazy rebuild."""
+        from src.retrieval.hybrid import HybridRetriever
+
+        hybrid = HybridRetriever(indexed_store, alpha=0.6)
+        chunk = Chunker(chunk_size=200, chunk_overlap=20).chunk(
+            Document(content="Late arriving text.", metadata={"source": "x.txt"}, doc_id="x")
+        )
+        assert hybrid.add_chunks(chunk) is False
+        assert hybrid._stale is True
+
+    def test_inverted_bm25_matches_rank_bm25(self) -> None:
+        """The inverted index must score exactly like rank_bm25.BM25Okapi, incl. IDF floor."""
+        import random
+
+        import numpy as np
+
+        from src.retrieval.hybrid import _InvertedBM25
+
+        BM25Okapi = pytest.importorskip("rank_bm25").BM25Okapi  # reference implementation
+
+        rng = random.Random(3)
+        common = ["the", "of", "and"]  # in >half the docs -> negative IDF -> epsilon floor
+        vocab = [f"t{i}" for i in range(300)]
+        corpus = [
+            [rng.choice(common) for _ in range(rng.randint(0, 5))]
+            + [rng.choice(vocab) for _ in range(rng.randint(0, 40))]
+            for _ in range(400)
+        ]
+        reference = BM25Okapi(corpus)
+        inverted = _InvertedBM25(corpus[:300])
+        inverted.add_documents(corpus[300:])  # appended, not built in one go
+
+        for query in (
+            ["the", "t5"],
+            ["t1", "t1", "t2"],
+            ["of", "and", "t7", "zzz"],
+            ["missing"],
+            [],
+        ):
+            np.testing.assert_allclose(
+                inverted.get_scores(query), reference.get_scores(query), rtol=1e-9, atol=1e-12
+            )
+
+    def test_hybrid_journal_survives_restart(
+        self, indexed_store: VectorStore, tmp_path: Path
+    ) -> None:
+        """Chunks appended after the base file was written are replayed on load."""
+        from src.retrieval.hybrid import HybridRetriever
+
+        persist = tmp_path / "bm25.json"
+        live = HybridRetriever(indexed_store, alpha=0.6, persist_path=persist)
+        live.build_index()
+        base_size = persist.stat().st_size
+
+        new_chunks = Chunker(chunk_size=200, chunk_overlap=20).chunk_many(
+            [
+                Document(
+                    content="Journaled text about quantization and vector compression.",
+                    metadata={"source": "j.txt", "filename": "j.txt"},
+                    doc_id="j",
+                )
+            ]
+        )
+        indexed_store.add_chunks(new_chunks)
+        assert live.add_chunks(new_chunks) is True
+        assert persist.stat().st_size == base_size  # base untouched; only the journal grew
+        assert live._delta_path.exists()
+
+        restarted = HybridRetriever(indexed_store, alpha=0.6, persist_path=persist)
+        assert restarted._load_index() is True
+        assert restarted._corpus_ids == live._corpus_ids
+        hit = restarted._bm25_search("quantization compression", k=1)[0]
+        assert hit["metadata"]["filename"] == "j.txt"
+
+        # A torn final line (crash mid-write) is ignored; the count check then rebuilds.
+        with open(live._delta_path, "a", encoding="utf-8") as f:
+            f.write('{"id": "torn", "text": "half wri')
+        again = HybridRetriever(indexed_store, alpha=0.6, persist_path=persist)
+        assert again._load_index() is True
+        assert "torn" not in again._corpus_ids
+
+        # A full rebuild folds the journal back into the base file.
+        live.build_index()
+        assert not live._delta_path.exists()
 
     def test_hybrid_index_persistence(self, indexed_store: VectorStore, tmp_path: Path) -> None:
         """Verify BM25 index can be saved to and loaded from disk (JSON format)."""

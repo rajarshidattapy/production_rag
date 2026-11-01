@@ -14,8 +14,7 @@ pypdf>=6.21.2                         # PDF document loading
 chromadb>=1.5.9                      # Vector database
 sentence-transformers>=6.2.0         # Embedding models + cross-encoders
 
-# Hybrid Search (Phase 2)
-rank-bm25>=0.2.2                     # BM25 keyword retrieval
+# Hybrid Search (Phase 2): BM25 is implemented in src/retrieval/hybrid.py (numpy only)
 
 # Generation
 openai>=3.37.0                        # OpenAI LLM backend

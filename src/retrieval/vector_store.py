@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import chromadb
+import numpy as np
 from chromadb.config import Settings as ChromaSettings
 
 from src.ingestion.chunker import Chunk
@@ -39,6 +40,9 @@ class VectorStore:
         chroma_port: int | None = None,
         embedding_query_cache_size: int = 256,
         ingest_batch_size: int = 2000,
+        hnsw_ef_search: int = 200,
+        hnsw_max_neighbors: int = 16,
+        hnsw_ef_construction: int = 100,
     ) -> None:
         if ingest_batch_size <= 0:
             raise ValueError(f"ingest_batch_size must be positive, got {ingest_batch_size}")
@@ -49,6 +53,9 @@ class VectorStore:
         self.chroma_host = chroma_host
         self.chroma_port = chroma_port
         self.ingest_batch_size = ingest_batch_size
+        self.hnsw_ef_search = hnsw_ef_search
+        self.hnsw_max_neighbors = hnsw_max_neighbors
+        self.hnsw_ef_construction = hnsw_ef_construction
 
         # Lazy-load embedding function
         self._embedding_fn = _ChromaEmbeddingFunction(
@@ -76,19 +83,54 @@ class VectorStore:
                 settings=ChromaSettings(anonymized_telemetry=False),
             )
 
-        def _get_or_create():
-            return self._client.get_or_create_collection(
-                name=collection_name,
-                embedding_function=self._embedding_fn,
-                metadata={"hnsw:space": "cosine"},
-            )
-
-        self._collection = retry_with_backoff(_get_or_create, retries=5, backoff_in_seconds=1.0)
+        self._collection = retry_with_backoff(
+            self._get_or_create_collection, retries=5, backoff_in_seconds=1.0
+        )
+        self._apply_search_ef()
         logger.info(
             "VectorStore initialised: collection=%s, path=%s",
             collection_name,
             self.persist_path,
         )
+
+    def _get_or_create_collection(self):
+        """Create the collection with explicit HNSW settings (or open the existing one).
+
+        ``ef_search`` is the main recall/latency knob: at 50k vectors, 10 gave ~0.74
+        recall@10 and 100-200 gave 0.996-1.0 at the same ~1.4 ms latency. ``max_neighbors``
+        and ``ef_construction`` only take effect when a collection is first created.
+        """
+        return self._client.get_or_create_collection(
+            name=self.collection_name,
+            embedding_function=self._embedding_fn,
+            configuration={
+                "hnsw": {
+                    "space": "cosine",
+                    "ef_search": self.hnsw_ef_search,
+                    "max_neighbors": self.hnsw_max_neighbors,
+                    "ef_construction": self.hnsw_ef_construction,
+                }
+            },
+        )
+
+    def _apply_search_ef(self) -> None:
+        """Apply ``ef_search`` to a pre-existing collection created with other settings.
+
+        Chroma loads the index lazily, so this takes effect for an index that has not
+        been queried yet in this process (i.e. on startup).
+        """
+        try:
+            current = (self._collection.configuration or {}).get("hnsw", {}).get("ef_search")
+            if current is not None and current != self.hnsw_ef_search:
+                self._collection.modify(configuration={"hnsw": {"ef_search": self.hnsw_ef_search}})
+                logger.info(
+                    "Updated ef_search %s -> %s on collection '%s'",
+                    current,
+                    self.hnsw_ef_search,
+                    self.collection_name,
+                )
+        except Exception:
+            logger.debug("Could not update HNSW ef_search", exc_info=True)
 
     # ------------------------------------------------------------------
     # Indexing
@@ -175,14 +217,48 @@ class VectorStore:
 
         return self._format_results(results)
 
-    def get_all_chunks(self) -> list[dict[str, Any]]:
-        """Retrieve all chunks (used for hybrid index building)."""
+    def iter_chunks(self, page_size: int = 5000, include_metadata: bool = True):
+        """Yield the whole collection in pages (lists of ``{id, document[, metadata]}``).
 
-        def _get():
-            return self._collection.get(include=["documents", "metadatas"])
+        Paged because a single unbounded ``get()`` exceeds SQLite's bound-variable limit
+        ("too many SQL variables") past ~25-30k chunks, and so callers that only need to
+        stream (e.g. building the BM25 index) never hold the full corpus in memory.
+        """
+        include = ["documents", "metadatas"] if include_metadata else ["documents"]
+        offset = 0
+        while True:
 
-        results = retry_with_backoff(_get, retries=3, backoff_in_seconds=0.5)
-        return self._format_get_results(results)
+            def _get(_o: int = offset):
+                return self._collection.get(include=include, limit=page_size, offset=_o)
+
+            page = self._format_get_results(
+                retry_with_backoff(_get, retries=3, backoff_in_seconds=0.5)
+            )
+            if not page:
+                return
+            yield page
+            if len(page) < page_size:
+                return
+            offset += len(page)
+
+    def get_all_chunks(self, page_size: int = 5000) -> list[dict[str, Any]]:
+        """Retrieve all chunks into one list (prefer ``iter_chunks`` for large collections)."""
+        return [chunk for page in self.iter_chunks(page_size) for chunk in page]
+
+    def get_chunks(self, ids: list[str], batch_size: int = 500) -> list[dict[str, Any]]:
+        """Fetch chunks by ID, in the order requested. Unknown IDs are skipped."""
+        found: dict[str, dict[str, Any]] = {}
+        for start in range(0, len(ids), batch_size):
+            batch = ids[start : start + batch_size]
+
+            def _get(_b: list[str] = batch):
+                return self._collection.get(ids=_b, include=["documents", "metadatas"])
+
+            for chunk in self._format_get_results(
+                retry_with_backoff(_get, retries=3, backoff_in_seconds=0.5)
+            ):
+                found[chunk["id"]] = chunk
+        return [found[i] for i in ids if i in found]
 
     # ------------------------------------------------------------------
     # Management
@@ -193,10 +269,7 @@ class VectorStore:
 
         def _delete():
             self._client.delete_collection(self.collection_name)
-            self._collection = self._client.get_or_create_collection(
-                name=self.collection_name,
-                embedding_function=self._embedding_fn,
-            )
+            self._collection = self._get_or_create_collection()
 
         retry_with_backoff(_delete, retries=3, backoff_in_seconds=0.5)
         logger.info("Deleted and recreated collection '%s'", self.collection_name)
@@ -237,9 +310,9 @@ class VectorStore:
     def _format_get_results(results: dict[str, Any]) -> list[dict[str, Any]]:
         """Format ChromaDB get results."""
         formatted: list[dict[str, Any]] = []
-        ids = results.get("ids", [])
-        docs = results.get("documents", [])
-        metas = results.get("metadatas", [])
+        ids = results.get("ids") or []
+        docs = results.get("documents") or []
+        metas = results.get("metadatas") or []
 
         for i, doc_id in enumerate(ids):
             formatted.append(
@@ -316,7 +389,13 @@ class _ChromaEmbeddingFunction:
         _EMBEDDING_MODEL_CACHE[self.model_name] = model
         self._model = model
 
-    def embed_query(self, input: list[str]) -> list[list[float]]:
+    @staticmethod
+    def _as_arrays(vectors: list[list[float]]) -> list[np.ndarray]:
+        """Chroma's HTTP client calls ``.tolist()`` on each embedding, so a server-mode
+        query (``RAG_CHROMA_HOST``) fails on plain lists. The embedded client accepts both."""
+        return [np.asarray(v, dtype=np.float32) for v in vectors]
+
+    def embed_query(self, input: list[str]) -> list[np.ndarray]:
         """Embed queries for retrieval (ChromaDB >= 0.5).
 
         Repeated or paraphrased queries (common across eval runs and demos)
@@ -326,7 +405,7 @@ class _ChromaEmbeddingFunction:
         would grow unbounded with ingestion volume.
         """
         if self._query_cache_size <= 0:
-            return self._encode(input)
+            return self._as_arrays(self._encode(input))
 
         results: list[list[float] | None] = [None] * len(input)
         misses: list[tuple[int, str]] = []
@@ -350,7 +429,7 @@ class _ChromaEmbeddingFunction:
                 if len(self._query_cache) > self._query_cache_size:
                     self._query_cache.popitem(last=False)
 
-        return results  # type: ignore[return-value]  # every slot filled above
+        return self._as_arrays(results)  # type: ignore[arg-type]  # every slot filled above
 
     def cache_stats(self) -> dict[str, int]:
         """Return query-embedding cache hit/miss/current-size counters."""
@@ -360,13 +439,13 @@ class _ChromaEmbeddingFunction:
             "size": len(self._query_cache),
         }
 
-    def embed_document(self, input: list[str]) -> list[list[float]]:
+    def embed_document(self, input: list[str]) -> list[np.ndarray]:
         """Embed documents for indexing (ChromaDB >= 0.5)."""
-        return self._encode(input)
+        return self._as_arrays(self._encode(input))
 
-    def __call__(self, input: list[str]) -> list[list[float]]:
+    def __call__(self, input: list[str]) -> list[np.ndarray]:
         """Fallback for older ChromaDB versions that call the object directly."""
-        return self._encode(input)
+        return self._as_arrays(self._encode(input))
 
     def _encode(self, input: list[str]) -> list[list[float]]:
         """Core encoding logic shared by all entry points."""

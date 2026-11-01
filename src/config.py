@@ -60,7 +60,11 @@ class Settings(BaseSettings):
     # Hybrid search (Phase 2)
     hybrid_alpha: float = 0.6  # weight for vector search (1.0 = pure vector, 0.0 = pure BM25)
     rrf_k: int = 60  # constant for Reciprocal Rank Fusion
-    bm25_max_index_mb: int = 500  # max BM25 corpus file persisted/loaded; raise for ~1M-chunk corpora
+    # HNSW index (ChromaDB). ef_search applies on startup; M / ef_construction only to new collections.
+    hnsw_ef_search: int = 200
+    hnsw_max_neighbors: int = 16
+    hnsw_ef_construction: int = 100
+    bm25_max_index_mb: int = 500  # max BM25 index file; ~1 KB/chunk, so ~2000 for 1M chunks
 
     # ---------- Re-ranker (Phase 2) ----------
     reranker_model: str = "BAAI/bge-reranker-large"

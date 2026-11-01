@@ -1,0 +1,5 @@
+# Development / CI dependencies (CI runs `pip install -r requirements-dev.txt`).
+-r requirements.txt
+
+# Reference BM25 implementation; tests assert src/retrieval/hybrid.py scores identically.
+rank-bm25>=0.2.2
