@@ -375,6 +375,7 @@ def healthz() -> HealthResponse:
 
 
 @app.get("/", include_in_schema=False)
+@app.get("/index.html", include_in_schema=False)
 def ui() -> FileResponse:
     """Serve the lightweight local RAG user interface."""
     return FileResponse(_UI_PATH)

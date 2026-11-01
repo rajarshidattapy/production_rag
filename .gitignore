@@ -20,6 +20,7 @@ data/eval_results/
 .venv/
 venv/
 env/
+data/
 
 # IDE
 .vscode/
@@ -53,3 +54,5 @@ coverage.xml
 dist/
 build/
 data/bm25_index_*.json
+
+graphify-out/

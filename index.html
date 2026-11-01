@@ -1,57 +1,100 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>RAG Desk</title>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>RAG Desk</title>
   <style>
-    :root { color-scheme: dark; --bg:#10131a; --panel:#191e29; --line:#2a3344; --text:#eef2fa; --muted:#a6b0c1; --accent:#75a7ff; --danger:#ff9b9b; }
-    * { box-sizing: border-box; } body { margin:0; font:15px/1.45 Inter, ui-sans-serif, system-ui, sans-serif; color:var(--text); background:radial-gradient(circle at top left,#1d3155,transparent 35%),var(--bg); }
-    main { max-width:1100px; margin:auto; padding:28px 18px 44px; } header { display:flex; justify-content:space-between; gap:16px; align-items:center; margin-bottom:24px; } h1 { font-size:26px; margin:0; } h2 { font-size:15px; margin:0 0 14px; } .sub, small { color:var(--muted); } .status { padding:6px 10px; border:1px solid var(--line); border-radius:99px; color:var(--muted); white-space:nowrap; }
-    .grid { display:grid; grid-template-columns:320px minmax(0,1fr); gap:16px; } .panel { background:color-mix(in srgb,var(--panel) 93%,transparent); border:1px solid var(--line); border-radius:14px; padding:18px; box-shadow:0 14px 40px #0003; } .stack { display:grid; gap:12px; }
-    input, button, textarea { font:inherit; } input[type=text], input[type=number], textarea { width:100%; background:#101520; border:1px solid var(--line); color:var(--text); border-radius:9px; padding:10px; } input:focus, textarea:focus { outline:2px solid #75a7ff77; border-color:var(--accent); } input[type=file] { width:100%; color:var(--muted); }
-    button { border:0; border-radius:9px; padding:10px 13px; background:var(--accent); color:#091426; font-weight:700; cursor:pointer; } button:hover { filter:brightness(1.08); } button:disabled { opacity:.55; cursor:wait; } button.secondary { color:var(--text); background:#263145; } label { display:grid; gap:6px; color:var(--muted); font-size:13px; } .checks { display:flex; flex-wrap:wrap; gap:11px; color:var(--muted); font-size:13px; } .checks label { display:flex; align-items:center; gap:5px; }
-    #chat { min-height:390px; max-height:58vh; overflow:auto; display:grid; align-content:start; gap:12px; padding:4px 2px; } .message { max-width:88%; padding:12px 14px; border-radius:12px; white-space:pre-wrap; } .user { justify-self:end; background:#2d4d82; } .assistant { background:#111722; border:1px solid var(--line); } .meta { color:var(--muted); font-size:12px; margin-top:8px; } .sources { margin:10px 0 0; padding-left:18px; color:var(--muted); font-size:13px; } .row { display:flex; gap:9px; } .row input { flex:1; } .notice { min-height:20px; color:var(--muted); font-size:13px; } .error { color:var(--danger); } details { color:var(--muted); font-size:12px; } summary { cursor:pointer; } pre { white-space:pre-wrap; overflow:auto; }
-    @media (max-width:760px) { .grid { grid-template-columns:1fr; } header { align-items:flex-start; flex-direction:column; } #chat { max-height:none; } }
+    :root{color-scheme:dark;--bg:#111318;--side:#171a20;--panel:#1c2028;--panel-2:#151921;--line:#2d3543;--text:#f2f4f8;--muted:#a8b1bf;--accent:#7ba9ff;--accent2:#314d7b;--danger:#ff9b9b}*{box-sizing:border-box}body{min-height:100vh;margin:0;color:var(--text);background:var(--bg);font:14px/1.45 Inter,ui-sans-serif,system-ui,sans-serif}.app{min-height:100vh;display:grid;grid-template-columns:276px minmax(0,1fr)}.sidebar{min-height:100vh;padding:18px 12px;display:flex;flex-direction:column;gap:14px;background:var(--side);border-right:1px solid var(--line)}.brand{padding:3px 8px 1px;font-size:18px;font-weight:750;letter-spacing:-.02em}.brand span{color:var(--accent)}button,input,details{font:inherit}button{border:0;border-radius:8px;padding:10px 12px;font-weight:700;color:#0c1421;background:var(--accent);cursor:pointer}button:hover{filter:brightness(1.07)}button:disabled{opacity:.55;cursor:wait}.new-chat{width:100%;text-align:left;color:var(--text);background:#252c38}.upload{padding:12px;display:grid;gap:10px;border:1px solid var(--line);border-radius:10px;background:var(--panel)}.upload strong{font-size:13px}.upload small{color:var(--muted)}input[type=file]{width:100%;color:var(--muted);font-size:12px}.keep{display:flex;gap:7px;align-items:center;color:var(--muted);font-size:12px}.upload button{width:100%}.history-label{padding:5px 8px 0;color:var(--muted);font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}#history{display:grid;align-content:start;gap:3px;overflow:auto}.chat-row{display:flex;gap:3px;align-items:stretch}.chat-item{min-width:0;flex:1;padding:9px 10px;overflow:hidden;border:1px solid transparent;color:var(--muted);background:transparent;text-align:left;font-weight:500}.chat-item:hover{background:#222833;color:var(--text)}.chat-item.active{color:var(--text);background:#293242;border-color:#3a4960}.delete-chat{width:32px;padding:0;color:var(--muted);background:transparent;font-size:18px;font-weight:400}.delete-chat:hover{color:var(--danger);background:#35242a}.chat-name,.chat-files{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.chat-files{margin-top:2px;color:var(--muted);font-size:11px}.side-footer{margin-top:auto;padding:10px 8px 2px;color:var(--muted);font-size:12px}summary{cursor:pointer}label{display:grid;gap:5px}input[type=text],input[type=number]{width:100%;padding:9px;border:1px solid var(--line);border-radius:8px;color:var(--text);background:#10141b}input:focus{outline:2px solid #7ba9ff66;border-color:var(--accent)}.options{margin-top:9px;display:grid;gap:9px}.checks{display:flex;flex-wrap:wrap;gap:8px;color:var(--muted)}.checks label{display:flex;align-items:center;gap:4px;font-size:12px}.workspace{min-width:0;min-height:100vh;display:grid;grid-template-rows:auto minmax(0,1fr) auto}.topbar{min-height:70px;padding:14px clamp(18px,4vw,48px);display:flex;justify-content:space-between;align-items:center;gap:14px;border-bottom:1px solid var(--line)}#chatTitle{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:16px;font-weight:700}#chatDocs{margin-top:2px;color:var(--muted);font-size:12px}.status{flex:none;padding:5px 9px;border:1px solid var(--line);border-radius:99px;color:var(--muted);font-size:12px;white-space:nowrap}#chat{width:min(900px,100%);margin:0 auto;padding:28px clamp(18px,4vw,48px);display:grid;align-content:start;gap:18px;overflow:auto}.message{max-width:min(82%,720px);padding:12px 14px;border-radius:11px;white-space:pre-wrap}.user{justify-self:end;background:var(--accent2)}.assistant{background:var(--panel);border:1px solid var(--line)}.sources{margin:10px 0 0;padding-left:18px;color:var(--muted);font-size:12px}.meta{margin-top:9px;color:var(--muted);font-size:12px}.empty{max-width:580px;margin:90px auto 0;text-align:center;color:var(--muted)}.empty h1{margin:0 0 9px;color:var(--text);font-size:25px;letter-spacing:-.03em}.composer-wrap{padding:14px clamp(18px,4vw,48px) 22px}#chatForm{width:min(900px,100%);margin:auto;display:flex;gap:9px;padding:8px;border:1px solid var(--line);border-radius:13px;background:var(--panel);box-shadow:0 12px 30px #0003}#question{flex:1;min-width:0;padding:8px;border:0;outline:0;color:var(--text);background:transparent}#chatForm button{padding:9px 16px}.attach{padding:0!important;min-width:38px;color:var(--muted)!important;background:#293242!important;font-size:21px;line-height:1}.notice{min-height:18px;color:var(--muted);font-size:12px}.error{color:var(--danger)}@media(max-width:720px){.app{grid-template-columns:1fr}.sidebar{min-height:auto;border-right:0;border-bottom:1px solid var(--line)}.upload{display:none}#history{display:flex;overflow:auto}.chat-row{flex:0 0 210px}.chat-item{flex:1}.history-label{display:none}.side-footer{display:none}.workspace{min-height:calc(100vh - 184px)}.message{max-width:92%}}
   </style>
 </head>
-<body>
-  <main>
-    <header><div><h1>RAG Desk</h1><div class="sub">Upload PDFs, add them to your knowledge base, then ask grounded questions.</div></div><div class="status" id="status">Checking server…</div></header>
-    <div class="grid">
-      <aside class="panel stack">
-        <h2>Knowledge base</h2>
-        <label>PDF files <input id="files" type="file" accept="application/pdf,.pdf" multiple></label>
-        <div class="checks"><label><input id="reset" type="checkbox"> Replace existing knowledge base</label></div>
-        <button id="upload">Upload &amp; ingest</button>
-        <div class="notice" id="uploadNotice"></div>
-        <hr style="border:0;border-top:1px solid var(--line);width:100%">
-        <h2>Request options</h2>
-        <label>Top results <input id="topK" type="number" min="1" max="20" value="5"></label>
-        <div class="checks"><label><input id="hybrid" type="checkbox"> Hybrid search</label><label><input id="reranker" type="checkbox"> Re-ranker</label><label><input id="healing" type="checkbox"> Self-heal</label></div>
-        <details><summary>API access</summary><label style="margin-top:10px">Bearer token (only if RAG_API_KEY is set)<input id="apiKey" type="text" placeholder="Optional"></label></details>
-        <div class="notice" id="stats"></div>
-      </aside>
-      <section class="panel stack">
-        <div id="chat"><div class="message assistant">Your knowledge base is ready when you upload and ingest one or more PDFs. Ask a question here afterwards.</div></div>
-        <form id="chatForm" class="row"><input id="question" autocomplete="off" placeholder="Ask about your PDFs…" required><button>Send</button></form>
-      </section>
-    </div>
-  </main>
-  <script>
-    const $ = id => document.getElementById(id);
-    const status = $('status'), chat = $('chat'), apiKey = $('apiKey');
-    apiKey.value = localStorage.ragApiKey || '';
-    apiKey.oninput = () => localStorage.ragApiKey = apiKey.value;
-    function headers(type) { const h = {}; if (type) h['Content-Type'] = type; if (apiKey.value.trim()) h.Authorization = `Bearer ${apiKey.value.trim()}`; return h; }
-    async function request(path, options = {}) { const response = await fetch(path, options); const body = await response.json().catch(() => ({})); if (!response.ok) throw new Error(body.detail || `Request failed (${response.status})`); return body; }
-    function notice(id, text, error = false) { const el = $(id); el.textContent = text; el.className = `notice${error ? ' error' : ''}`; }
-    function addMessage(role, text, citations = [], healing) { const el = document.createElement('div'); el.className = `message ${role}`; el.textContent = text; if (citations.length) { const list = document.createElement('ul'); list.className = 'sources'; citations.forEach(c => { const item = document.createElement('li'); item.textContent = `${c.filename || c.source} — ${c.text_snippet}`; list.append(item); }); el.append(list); } if (healing) { const meta = document.createElement('div'); meta.className = 'meta'; meta.textContent = `Self-healing: ${healing.status}; attempts: ${healing.attempts}`; el.append(meta); } chat.append(el); chat.scrollTop = chat.scrollHeight; }
-    async function refreshStats() { try { const s = await request('/stats', {headers:headers()}); $('stats').textContent = `${s.chunks_in_store} chunks · ${s.llm_model}`; } catch { $('stats').textContent = ''; } }
-    async function health() { try { await request('/healthz'); status.textContent = '● Server connected'; status.style.color = '#99e6b3'; await refreshStats(); } catch { status.textContent = '● Server unavailable'; status.style.color = 'var(--danger)'; } }
-    $('upload').onclick = async () => { const files = [...$('files').files]; if (!files.length) return notice('uploadNotice', 'Choose at least one PDF.', true); const button = $('upload'); button.disabled = true; try { for (let i = 0; i < files.length; i++) { notice('uploadNotice', `Uploading ${i + 1}/${files.length}: ${files[i].name}`); const uploaded = await request(`/upload?filename=${encodeURIComponent(files[i].name)}`, {method:'POST', headers:headers('application/pdf'), body:files[i]}); notice('uploadNotice', `Ingesting ${files[i].name}…`); const result = await request('/ingest', {method:'POST', headers:headers('application/json'), body:JSON.stringify({source:uploaded.source, reset:$('reset').checked && i === 0})}); notice('uploadNotice', `${files[i].name}: ${result.chunks_ingested} chunks added (${result.total_chunks} total).`); } $('files').value = ''; await refreshStats(); } catch (err) { notice('uploadNotice', err.message, true); } finally { button.disabled = false; } };
-    $('chatForm').onsubmit = async event => { event.preventDefault(); const input = $('question'), question = input.value.trim(); if (!question) return; input.value = ''; addMessage('user', question); const button = event.currentTarget.querySelector('button'); button.disabled = true; try { const result = await request('/query', {method:'POST', headers:headers('application/json'), body:JSON.stringify({question, top_k:Number($('topK').value) || 5, use_hybrid:$('hybrid').checked, use_reranker:$('reranker').checked, self_heal:$('healing').checked})}); addMessage('assistant', result.answer, result.citations || [], result.healing); } catch (err) { addMessage('assistant', `Error: ${err.message}`); } finally { button.disabled = false; input.focus(); } };
-    health();
-  </script>
-</body>
-</html>
+<body><div class="app">
+  <aside class="sidebar"><div class="brand">RAG <span>Desk</span></div><button class="new-chat" id="newChat">+ New chat</button>
+    <div class="notice" id="uploadNotice"></div><input id="files" type="file" hidden><input id="keepDocs" type="checkbox" hidden><button id="upload" type="button" hidden></button>
+    <div class="history-label">Your chats</div><nav id="history" aria-label="Chat history"></nav>
+    <div class="side-footer"><details><summary>Retrieval options</summary><div class="options"><label>Top results <input id="topK" type="number" min="1" max="20" value="5"></label><div class="checks"><label><input id="hybrid" type="checkbox"> Hybrid</label><label><input id="reranker" type="checkbox"> Re-rank</label><label><input id="healing" type="checkbox"> Self-heal</label></div></div></details><details style="margin-top:9px"><summary>API access</summary><label class="options">Bearer token<input id="apiKey" type="text" placeholder="Optional"></label></details><div class="notice" id="stats"></div></div>
+  </aside>
+  <main class="workspace"><header class="topbar"><div><div id="chatTitle">New chat</div><div id="chatDocs">No PDFs attached</div></div><div class="status" id="status">Checking server...</div></header><section id="chat" aria-live="polite"></section><div class="composer-wrap"><form id="chatForm"><input id="chatFiles" type="file" accept="application/pdf,.pdf" multiple hidden><button class="attach" id="attachFiles" type="button" title="Add PDFs to this chat" aria-label="Add PDFs to this chat">+</button><input id="question" autocomplete="off" placeholder="Ask anything about your PDFs..." required><button>Send</button></form></div></main>
+</div>
+<script>
+const $=id=>document.getElementById(id),STORE='rag-desk-chats-v1';let chats=JSON.parse(localStorage.getItem(STORE)||'[]'),activeId=localStorage.getItem('rag-desk-active');const apiKey=$('apiKey');apiKey.value=localStorage.ragApiKey||'';apiKey.oninput=()=>localStorage.ragApiKey=apiKey.value;const id=()=>`${Date.now()}-${Math.random().toString(36).slice(2,8)}`;function save(){localStorage.setItem(STORE,JSON.stringify(chats));localStorage.setItem('rag-desk-active',activeId||'')}function active(){return chats.find(c=>c.id===activeId)}function newChat(title='New chat',files=[]){const chat={id:id(),title,files,createdAt:Date.now(),messages:[]};chats.unshift(chat);activeId=chat.id;save();render();return chat}if(!active())newChat();function headers(type){const h={};if(type)h['Content-Type']=type;if(apiKey.value.trim())h.Authorization=`Bearer ${apiKey.value.trim()}`;return h}async function request(path,options={}){const response=await fetch(path,options),body=await response.json().catch(()=>({}));if(!response.ok)throw new Error(body.detail||`Request failed (${response.status})`);return body}function notice(text,error=false){const el=$('uploadNotice');el.textContent=text;el.className=`notice${error?' error':''}`}function deleteChat(chatId){const item=chats.find(c=>c.id===chatId);if(!item||!confirm(`Delete “${item.title}”? This only removes the saved chat history.`))return;chats=chats.filter(c=>c.id!==chatId);if(activeId===chatId)activeId=chats[0]?.id||null;if(!activeId)newChat();else{save();render()}}function renderHistory(){const history=$('history');history.replaceChildren();chats.forEach(item=>{const row=document.createElement('div');row.className='chat-row';const button=document.createElement('button');button.className=`chat-item${item.id===activeId?' active':''}`;button.onclick=()=>{activeId=item.id;save();render()};const name=document.createElement('span');name.className='chat-name';name.textContent=item.title;button.append(name);if(item.files.length){const files=document.createElement('span');files.className='chat-files';files.textContent=item.files.join(', ');button.append(files)}const remove=document.createElement('button');remove.className='delete-chat';remove.title=`Delete ${item.title}`;remove.setAttribute('aria-label',remove.title);remove.textContent='×';remove.onclick=()=>deleteChat(item.id);row.append(button,remove);history.append(row)})}function messageNode(message){const el=document.createElement('div');el.className=`message ${message.role}`;el.textContent=message.text;if(message.citations?.length){const list=document.createElement('ul');list.className='sources';message.citations.forEach(c=>{const item=document.createElement('li');item.textContent=`${c.filename||c.source} — ${c.text_snippet}`;list.append(item)});el.append(list)}if(message.healing){const meta=document.createElement('div');meta.className='meta';meta.textContent=`Self-healing: ${message.healing.status}; attempts: ${message.healing.attempts}`;el.append(meta)}return el}function render(){const current=active();$('chatTitle').textContent=current.title;$('chatDocs').textContent=current.files.length?current.files.join(', '):'No PDFs attached';renderHistory();const area=$('chat');area.replaceChildren();if(!current.messages.length){const empty=document.createElement('div');empty.className='empty';empty.innerHTML='<h1>How can I help?</h1><div>Upload one or more PDFs from the sidebar, then ask a question grounded in those documents.</div>';area.append(empty)}else current.messages.forEach(m=>area.append(messageNode(m)));area.scrollTop=area.scrollHeight}function addMessage(role,text,citations=[],healing=null){active().messages.push({role,text,citations,healing});save();render()}async function refreshStats(){try{const s=await request('/stats',{headers:headers()});$('stats').textContent=`${s.chunks_in_store} chunks · ${s.llm_model}`}catch{$('stats').textContent=''}}async function health(){try{await request('/healthz');$('status').textContent='● Server connected';$('status').style.color='#9ae6b4';await refreshStats()}catch{$('status').textContent='● Server unavailable';$('status').style.color='var(--danger)'}}$('newChat').onclick=()=>newChat();$('upload').onclick=async()=>{const files=[...$('files').files];if(!files.length)return notice('Choose at least one PDF.',true);const current=newChat(files.length===1?files[0].name:`${files.length} PDFs`,files.map(f=>f.name)),button=$('upload');button.disabled=true;try{for(let i=0;i<files.length;i++){notice(`Uploading ${i+1}/${files.length}: ${files[i].name}`);const uploaded=await request(`/upload?filename=${encodeURIComponent(files[i].name)}`,{method:'POST',headers:headers('application/pdf'),body:files[i]});notice(`Ingesting ${files[i].name}...`);const result=await request('/ingest',{method:'POST',headers:headers('application/json'),body:JSON.stringify({source:uploaded.source,reset:!$('keepDocs').checked&&i===0})});notice(`${files[i].name}: ${result.chunks_ingested} chunks added (${result.total_chunks} total).`)}current.messages.push({role:'assistant',text:`I’m ready to answer questions about ${current.files.join(', ')}.`,citations:[]});save();render();$('files').value='';await refreshStats()}catch(error){notice(error.message,true)}finally{button.disabled=false}};$('chatForm').onsubmit=async event=>{event.preventDefault();const input=$('question'),question=input.value.trim();if(!question)return;const current=active();input.value='';if(current.title==='New chat'){current.title=question.slice(0,42);save()}addMessage('user',question);const button=event.currentTarget.querySelector('button');button.disabled=true;try{const result=await request('/query',{method:'POST',headers:headers('application/json'),body:JSON.stringify({question,top_k:Number($('topK').value)||5,use_hybrid:$('hybrid').checked,use_reranker:$('reranker').checked,self_heal:$('healing').checked})});addMessage('assistant',result.answer,result.citations||[],result.healing)}catch(error){addMessage('assistant',`Error: ${error.message}`)}finally{button.disabled=false;input.focus()}};render();health();
+</script>
+<script>
+  $('attachFiles').onclick = () => $('chatFiles').click();
+  $('chatFiles').onchange = async () => {
+    const files = [...$('chatFiles').files];
+    if (!files.length) return;
+    const button = $('attachFiles');
+    button.disabled = true;
+    try {
+      const current = newChat(
+        files.length === 1 ? files[0].name : `${files.length} PDFs`,
+        files.map(file => file.name),
+      );
+      let firstFile = true;
+      for (const file of files) {
+        notice(`Adding ${file.name} to this chat...`);
+        const uploaded = await request(`/upload?filename=${encodeURIComponent(file.name)}`, {
+          method: 'POST', headers: headers('application/pdf'), body: file,
+        });
+        const result = await request('/ingest', {
+          method: 'POST', headers: headers('application/json'),
+          body: JSON.stringify({source: uploaded.source, reset: firstFile}),
+        });
+        firstFile = false;
+        if (!current.files.includes(file.name)) current.files.push(file.name);
+        notice(`${file.name}: ${result.chunks_ingested} chunks added.`);
+      }
+      current.messages.push({role: 'assistant', text: `Added ${files.map(file => file.name).join(', ')} to this chat.`, citations: []});
+      save(); render(); await refreshStats();
+    } catch (error) {
+      notice(error.message, true);
+    } finally {
+      button.disabled = false;
+      $('chatFiles').value = '';
+    }
+  };
+</script>
+<style>
+  :root { --bg:#000; --side:#080808; --panel:#121212; --panel-2:#0d0d0d; --line:#292929; --text:#f4f4f4; --muted:#959595; --accent:#ededed; --accent2:#272727; }
+  body { height:100vh; overflow:hidden; } .app { height:100vh; min-height:0; overflow:hidden; } .sidebar,.workspace { height:100vh; min-height:0; } .workspace { grid-template-rows:auto minmax(0,1fr) auto; } #chat { min-height:0; height:100%; overscroll-behavior:contain; } .composer-wrap { flex:none; }
+  @media (min-width:721px) { .app { grid-template-columns:260px minmax(0,1fr)!important; } .sidebar { grid-column:1; grid-row:1; width:260px; padding:14px 10px; overflow:hidden; border-left:0; border-right:1px solid #242424; } .brand { padding:8px 10px 12px; } .new-chat { padding:10px 12px; border-radius:9px; } #history { min-height:0; padding:0 2px; } .workspace { grid-column:2; grid-row:1; width:auto; min-width:0; } }
+  .sidebar { background:#080808; } .brand span { color:#fff; } .new-chat { background:#1b1b1b; border:1px solid #303030; } .chat-item:hover { background:#171717; } .chat-item.active { background:#202020; border-color:#353535; } .delete-chat:hover { background:#2b1717; }
+  .status { background:#0c0c0c; } .assistant { background:#101010; border-color:#292929; } .user { background:#282828; } #chatForm { background:#121212; border-color:#303030; box-shadow:0 12px 30px #0008; } #chatForm button:not(.attach) { background:#ededed; color:#090909; } .attach { background:#202020!important; color:#e9e9e9!important; } input[type=text],input[type=number] { background:#0b0b0b; } input:focus { outline:2px solid #ffffff40; border-color:#dedede; }
+  .typing { display:flex; align-items:center; gap:9px; min-height:38px; padding:10px 13px; border:1px solid #292929; border-radius:11px; background:#101010; color:var(--muted); font-size:13px; }
+  .typing-dot { width:8px; height:8px; border-radius:50%; background:#f1f1f1; animation:thinking 1s ease-in-out infinite; } @keyframes thinking { 0%,100% { opacity:.2; transform:scale(.72); } 50% { opacity:1; transform:scale(1); } } @media (max-width:720px) { body { height:auto; overflow:auto; } .app,.sidebar,.workspace { height:auto; overflow:visible; } }
+</style>
+<script>
+  function showTyping() {
+    const indicator = document.createElement('div');
+    indicator.className = 'typing';
+    indicator.innerHTML = '<span class="typing-dot"></span><span>Thinking</span>';
+    $('chat').append(indicator);
+    $('chat').scrollTop = $('chat').scrollHeight;
+    return indicator;
+  }
+
+  $('chatForm').onsubmit = async event => {
+    event.preventDefault();
+    const input = $('question'), question = input.value.trim();
+    if (!question) return;
+    const current = active();
+    input.value = '';
+    if (current.title === 'New chat') { current.title = question.slice(0, 42); save(); }
+    addMessage('user', question);
+    const button = event.currentTarget.querySelector('button:last-child');
+    button.disabled = true;
+    const typing = showTyping();
+    try {
+      const result = await request('/query', {
+        method:'POST', headers:headers('application/json'),
+        body:JSON.stringify({question, top_k:Number($('topK').value) || 5, use_hybrid:$('hybrid').checked, use_reranker:$('reranker').checked, self_heal:$('healing').checked}),
+      });
+      addMessage('assistant', result.answer, result.citations || [], result.healing);
+    } catch (error) {
+      addMessage('assistant', `Error: ${error.message}`);
+    } finally {
+      typing.remove();
+      button.disabled = false;
+      input.focus();
+    }
+  };
+</script></body></html>
