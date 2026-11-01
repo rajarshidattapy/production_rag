@@ -22,9 +22,9 @@ from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
@@ -104,6 +104,7 @@ app = FastAPI(
 # key — required for Docker/Kubernetes liveness probes, which never send
 # an Authorization header.
 _auth = Depends(_check_api_key)
+_UI_PATH = Path(__file__).resolve().parents[1] / "index.html"
 
 
 class _RequestIDMiddleware(BaseHTTPMiddleware):
@@ -298,6 +299,12 @@ class IngestResponse(BaseModel):
     total_chunks: int
 
 
+class UploadResponse(BaseModel):
+    filename: str
+    source: str
+    size_bytes: int
+
+
 class IngestJobResponse(BaseModel):
     job_id: str
     status: str
@@ -365,6 +372,12 @@ def _healing_payload(info: Any) -> dict[str, Any]:
 def healthz() -> HealthResponse:
     """Lightweight liveness check that does not load heavy models."""
     return HealthResponse(status="ok")
+
+
+@app.get("/", include_in_schema=False)
+def ui() -> FileResponse:
+    """Serve the lightweight local RAG user interface."""
+    return FileResponse(_UI_PATH)
 
 
 @app.get("/readyz", response_model=HealthResponse, dependencies=[_auth])
@@ -436,6 +449,46 @@ def _resolve_ingest_source(source: str) -> Path:
         )
 
     return source_path
+
+
+@app.post("/upload", response_model=UploadResponse, dependencies=[_auth])
+async def upload_pdf(request: Request, filename: str = Query(..., min_length=1)) -> UploadResponse:
+    """Save a browser-uploaded PDF under the configured data directory.
+
+    Files are intentionally stored inside ``data/uploads`` so the existing
+    ingestion guard remains the single authority for allowed source paths.
+    The request body is raw PDF bytes, avoiding an extra multipart dependency.
+    """
+    safe_name = Path(filename).name
+    if not safe_name.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files can be uploaded.")
+
+    max_bytes = int(_settings.max_file_size_mb * 1024 * 1024)
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File exceeds the {_settings.max_file_size_mb:g} MB upload limit.",
+        )
+
+    content = await request.body()
+    if not content:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+    if len(content) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File exceeds the {_settings.max_file_size_mb:g} MB upload limit.",
+        )
+
+    upload_dir = Path(_settings.data_dir).resolve() / "uploads"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    destination = upload_dir / f"{uuid.uuid4().hex}_{safe_name}"
+    await asyncio.to_thread(destination.write_bytes, content)
+    return UploadResponse(
+        filename=safe_name,
+        source=str(destination),
+        size_bytes=len(content),
+    )
 
 
 @app.post("/ingest", response_model=IngestResponse, dependencies=[_auth])

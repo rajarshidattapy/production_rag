@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RAG Desk</title>
+  <style>
+    :root { color-scheme: dark; --bg:#10131a; --panel:#191e29; --line:#2a3344; --text:#eef2fa; --muted:#a6b0c1; --accent:#75a7ff; --danger:#ff9b9b; }
+    * { box-sizing: border-box; } body { margin:0; font:15px/1.45 Inter, ui-sans-serif, system-ui, sans-serif; color:var(--text); background:radial-gradient(circle at top left,#1d3155,transparent 35%),var(--bg); }
+    main { max-width:1100px; margin:auto; padding:28px 18px 44px; } header { display:flex; justify-content:space-between; gap:16px; align-items:center; margin-bottom:24px; } h1 { font-size:26px; margin:0; } h2 { font-size:15px; margin:0 0 14px; } .sub, small { color:var(--muted); } .status { padding:6px 10px; border:1px solid var(--line); border-radius:99px; color:var(--muted); white-space:nowrap; }
+    .grid { display:grid; grid-template-columns:320px minmax(0,1fr); gap:16px; } .panel { background:color-mix(in srgb,var(--panel) 93%,transparent); border:1px solid var(--line); border-radius:14px; padding:18px; box-shadow:0 14px 40px #0003; } .stack { display:grid; gap:12px; }
+    input, button, textarea { font:inherit; } input[type=text], input[type=number], textarea { width:100%; background:#101520; border:1px solid var(--line); color:var(--text); border-radius:9px; padding:10px; } input:focus, textarea:focus { outline:2px solid #75a7ff77; border-color:var(--accent); } input[type=file] { width:100%; color:var(--muted); }
+    button { border:0; border-radius:9px; padding:10px 13px; background:var(--accent); color:#091426; font-weight:700; cursor:pointer; } button:hover { filter:brightness(1.08); } button:disabled { opacity:.55; cursor:wait; } button.secondary { color:var(--text); background:#263145; } label { display:grid; gap:6px; color:var(--muted); font-size:13px; } .checks { display:flex; flex-wrap:wrap; gap:11px; color:var(--muted); font-size:13px; } .checks label { display:flex; align-items:center; gap:5px; }
+    #chat { min-height:390px; max-height:58vh; overflow:auto; display:grid; align-content:start; gap:12px; padding:4px 2px; } .message { max-width:88%; padding:12px 14px; border-radius:12px; white-space:pre-wrap; } .user { justify-self:end; background:#2d4d82; } .assistant { background:#111722; border:1px solid var(--line); } .meta { color:var(--muted); font-size:12px; margin-top:8px; } .sources { margin:10px 0 0; padding-left:18px; color:var(--muted); font-size:13px; } .row { display:flex; gap:9px; } .row input { flex:1; } .notice { min-height:20px; color:var(--muted); font-size:13px; } .error { color:var(--danger); } details { color:var(--muted); font-size:12px; } summary { cursor:pointer; } pre { white-space:pre-wrap; overflow:auto; }
+    @media (max-width:760px) { .grid { grid-template-columns:1fr; } header { align-items:flex-start; flex-direction:column; } #chat { max-height:none; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header><div><h1>RAG Desk</h1><div class="sub">Upload PDFs, add them to your knowledge base, then ask grounded questions.</div></div><div class="status" id="status">Checking server…</div></header>
+    <div class="grid">
+      <aside class="panel stack">
+        <h2>Knowledge base</h2>
+        <label>PDF files <input id="files" type="file" accept="application/pdf,.pdf" multiple></label>
+        <div class="checks"><label><input id="reset" type="checkbox"> Replace existing knowledge base</label></div>
+        <button id="upload">Upload &amp; ingest</button>
+        <div class="notice" id="uploadNotice"></div>
+        <hr style="border:0;border-top:1px solid var(--line);width:100%">
+        <h2>Request options</h2>
+        <label>Top results <input id="topK" type="number" min="1" max="20" value="5"></label>
+        <div class="checks"><label><input id="hybrid" type="checkbox"> Hybrid search</label><label><input id="reranker" type="checkbox"> Re-ranker</label><label><input id="healing" type="checkbox"> Self-heal</label></div>
+        <details><summary>API access</summary><label style="margin-top:10px">Bearer token (only if RAG_API_KEY is set)<input id="apiKey" type="text" placeholder="Optional"></label></details>
+        <div class="notice" id="stats"></div>
+      </aside>
+      <section class="panel stack">
+        <div id="chat"><div class="message assistant">Your knowledge base is ready when you upload and ingest one or more PDFs. Ask a question here afterwards.</div></div>
+        <form id="chatForm" class="row"><input id="question" autocomplete="off" placeholder="Ask about your PDFs…" required><button>Send</button></form>
+      </section>
+    </div>
+  </main>
+  <script>
+    const $ = id => document.getElementById(id);
+    const status = $('status'), chat = $('chat'), apiKey = $('apiKey');
+    apiKey.value = localStorage.ragApiKey || '';
+    apiKey.oninput = () => localStorage.ragApiKey = apiKey.value;
+    function headers(type) { const h = {}; if (type) h['Content-Type'] = type; if (apiKey.value.trim()) h.Authorization = `Bearer ${apiKey.value.trim()}`; return h; }
+    async function request(path, options = {}) { const response = await fetch(path, options); const body = await response.json().catch(() => ({})); if (!response.ok) throw new Error(body.detail || `Request failed (${response.status})`); return body; }
+    function notice(id, text, error = false) { const el = $(id); el.textContent = text; el.className = `notice${error ? ' error' : ''}`; }
+    function addMessage(role, text, citations = [], healing) { const el = document.createElement('div'); el.className = `message ${role}`; el.textContent = text; if (citations.length) { const list = document.createElement('ul'); list.className = 'sources'; citations.forEach(c => { const item = document.createElement('li'); item.textContent = `${c.filename || c.source} — ${c.text_snippet}`; list.append(item); }); el.append(list); } if (healing) { const meta = document.createElement('div'); meta.className = 'meta'; meta.textContent = `Self-healing: ${healing.status}; attempts: ${healing.attempts}`; el.append(meta); } chat.append(el); chat.scrollTop = chat.scrollHeight; }
+    async function refreshStats() { try { const s = await request('/stats', {headers:headers()}); $('stats').textContent = `${s.chunks_in_store} chunks · ${s.llm_model}`; } catch { $('stats').textContent = ''; } }
+    async function health() { try { await request('/healthz'); status.textContent = '● Server connected'; status.style.color = '#99e6b3'; await refreshStats(); } catch { status.textContent = '● Server unavailable'; status.style.color = 'var(--danger)'; } }
+    $('upload').onclick = async () => { const files = [...$('files').files]; if (!files.length) return notice('uploadNotice', 'Choose at least one PDF.', true); const button = $('upload'); button.disabled = true; try { for (let i = 0; i < files.length; i++) { notice('uploadNotice', `Uploading ${i + 1}/${files.length}: ${files[i].name}`); const uploaded = await request(`/upload?filename=${encodeURIComponent(files[i].name)}`, {method:'POST', headers:headers('application/pdf'), body:files[i]}); notice('uploadNotice', `Ingesting ${files[i].name}…`); const result = await request('/ingest', {method:'POST', headers:headers('application/json'), body:JSON.stringify({source:uploaded.source, reset:$('reset').checked && i === 0})}); notice('uploadNotice', `${files[i].name}: ${result.chunks_ingested} chunks added (${result.total_chunks} total).`); } $('files').value = ''; await refreshStats(); } catch (err) { notice('uploadNotice', err.message, true); } finally { button.disabled = false; } };
+    $('chatForm').onsubmit = async event => { event.preventDefault(); const input = $('question'), question = input.value.trim(); if (!question) return; input.value = ''; addMessage('user', question); const button = event.currentTarget.querySelector('button'); button.disabled = true; try { const result = await request('/query', {method:'POST', headers:headers('application/json'), body:JSON.stringify({question, top_k:Number($('topK').value) || 5, use_hybrid:$('hybrid').checked, use_reranker:$('reranker').checked, self_heal:$('healing').checked})}); addMessage('assistant', result.answer, result.citations || [], result.healing); } catch (err) { addMessage('assistant', `Error: ${err.message}`); } finally { button.disabled = false; input.focus(); } };
+    health();
+  </script>
+</body>
+</html>
