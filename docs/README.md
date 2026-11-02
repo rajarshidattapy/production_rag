@@ -68,31 +68,6 @@ flowchart TD
 
 The self-healing branches run only when enabled globally or per query. Otherwise, generation and citations return directly to the API response.
 
-### Self-healing detail (Phase 4, opt-in)
-
-```mermaid
-flowchart TD
-    Q[Query] --> A[Query analysis]
-    A --> R[Hybrid retrieval<br/>BM25 + vector + RRF]
-    R --> RR[Cross-encoder rerank]
-    RR --> G[Generate]
-    G --> V{Verifier<br/>deterministic checks → LLM judge}
-    V -- PASS --> OK[Answer + citations<br/>+ healing metadata]
-    V -- FAIL --> D{Failure diagnosis}
-    D -- RETRIEVAL / QUERY --> RW[Rewrite query<br/>widen k · re-balance α · multi-query fusion]
-    RW --> R
-    D -- CONTEXT --> EX[More passages<br/>bigger context budget]
-    EX --> R
-    D -- GENERATION / CITATION --> RG[Regenerate on same context<br/>with repair prompt]
-    RG --> V
-    D -- max attempts --> AB[Abstain<br/>status: abstained · reason · attempts]
-```
-
-Every retry changes system behaviour based on the diagnosis — a different query, a
-different retrieval plan, or a different generation prompt — and is re-verified.
-See [**docs/SELF\_HEALING.md**](docs/SELF_HEALING.md) for the state machine, failure
-types, repair strategies, metrics, and limitations.
-
 ### Four Progressive Phases
 
 
