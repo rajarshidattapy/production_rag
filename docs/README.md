@@ -23,91 +23,47 @@ Query → Language detection → HybridRetriever (RRF fusion)
 ## Architecture
 
 ```mermaid
-flowchart TB
-    UI[Browser UI<br/>PDF upload · chat · local chat history]
-    API[FastAPI API<br/>auth · CORS · request IDs · rate/error handling]
+flowchart TD
+    UI[Browser UI<br/>Select PDF with + button]
 
-    UI -->|POST /upload| API
-    UI -->|POST /ingest or /ingest/async| API
-    UI -->|POST /query or /query/stream| API
+    UI -->|1. Upload PDF| UPLOAD[FastAPI upload endpoint]
+    UPLOAD --> SAFE[Validate file type, size, and path]
+    SAFE --> SAVE[Save under data/uploads]
+    SAVE --> INGEST[Ingest document]
+    INGEST --> LOAD[Extract text<br/>PDF, TXT, MD, or JSON]
+    LOAD --> CHUNK[Split into overlapping chunks]
+    CHUNK --> DOC_LANG[Detect document language]
+    DOC_LANG --> EMBED[Create sentence-transformer embeddings]
+    EMBED --> WRITE[Batch and retry writes]
+    WRITE --> CHROMA[(ChromaDB<br/>dense vectors by language)]
+    CHUNK --> BM25[(BM25<br/>sparse keyword index)]
+    CHROMA --> READY[Knowledge base ready]
+    BM25 --> READY
 
-    subgraph Ingestion[Ingestion pipeline]
-        UPLOAD[Save PDF under data/uploads]
-        GUARD[Validate path, type, file size, and page limit]
-        LOAD[DocumentLoader<br/>PDF · TXT · MD · JSON]
-        CHUNK[Recursive Chunker<br/>chunk size + overlap]
-        LANG_DOC[Language detection<br/>en · de · es]
-        EMBED[Sentence-transformer embeddings]
-        BATCH[Batch + retry writes]
-    end
+    READY --> QUESTION[2. User asks a question]
+    QUESTION --> API[FastAPI query endpoint<br/>auth, validation, request ID]
+    API --> QUERY_LANG[Detect query language]
+    QUERY_LANG --> RETRIEVE[Retrieve candidate chunks]
+    CHROMA --> RETRIEVE
+    BM25 --> HYBRID[Optional hybrid fusion<br/>BM25 + vector + RRF]
+    RETRIEVE --> HYBRID
+    HYBRID --> RERANK[Optional cross-encoder reranker]
+    RERANK --> CONTEXT[Apply context budget]
+    CONTEXT --> PROMPT[Build grounded prompt<br/>with numbered sources]
+    PROMPT --> LLM[LLM generation<br/>OpenAI, OpenRouter, or Anthropic]
+    LLM --> CITE[Build answer citations]
 
-    API --> UPLOAD --> GUARD --> LOAD --> CHUNK --> LANG_DOC --> EMBED --> BATCH
+    CITE --> HEAL{Self-healing enabled?}
+    HEAL -->|No| RESPONSE[3. Return answer, citations,<br/>token usage, and latency]
+    HEAL -->|Yes| VERIFY[Verify answer quality<br/>and citation support]
+    VERIFY -->|Pass| RESPONSE
+    VERIFY -->|Fail| REPAIR[Diagnose and repair<br/>rewrite, retrieve wider,<br/>expand context, or regenerate]
+    REPAIR --> RETRIEVE
+    VERIFY -->|Max attempts| ABSTAIN[Structured abstention]
+    ABSTAIN --> RESPONSE
 
-    subgraph Storage[Persistent retrieval storage]
-        CHROMA[(ChromaDB<br/>per-language dense collections)]
-        BM25[(BM25 sparse index<br/>journal + persistence)]
-    end
-
-    BATCH --> CHROMA
-    CHUNK --> BM25
-
-    subgraph Query[Query and retrieval pipeline]
-        VALIDATE[Validate question length]
-        LANG_Q[Detect query language]
-        CACHE[Query embedding LRU cache]
-        DENSE[Dense vector search]
-        SPARSE[Optional BM25 search]
-        FUSE[Optional RRF hybrid fusion]
-        RERANK[Optional cross-encoder reranker]
-        BUDGET[Context budget guardrail]
-    end
-
-    API --> VALIDATE --> LANG_Q --> CACHE --> DENSE
-    LANG_Q --> SPARSE
-    DENSE --> FUSE
-    SPARSE --> FUSE
-    FUSE --> RERANK --> BUDGET
-    CHROMA --> DENSE
-    BM25 --> SPARSE
-
-    subgraph Generation[Generation and citations]
-        PROMPT[Grounded system prompt<br/>context + source references]
-        LLM[LLM client<br/>OpenAI · OpenRouter · Anthropic]
-        CITE[Build citations]
-    end
-
-    BUDGET --> PROMPT --> LLM --> CITE
-
-    subgraph Healing[Optional self-healing loop]
-        HEAL_ENABLED{Self-healing enabled?}
-        VERIFY{Verifier<br/>deterministic checks + LLM judge}
-        DIAGNOSE{Failure diagnosis}
-        REWRITE[Rewrite query<br/>wider retrieval · rebalanced hybrid]
-        EXPAND[Expand context budget]
-        REGENERATE[Regenerate with repair prompt]
-        ABSTAIN[Structured abstention<br/>after max attempts]
-    end
-
-    CITE --> HEAL_ENABLED
-    HEAL_ENABLED -->|no| RESPONSE[Answer + citations + usage metadata]
-    HEAL_ENABLED -->|yes| VERIFY
-    VERIFY -->|passed| RESPONSE
-    VERIFY -->|failed| DIAGNOSE
-    DIAGNOSE -->|retrieval or query| REWRITE --> LANG_Q
-    DIAGNOSE -->|context| EXPAND --> DENSE
-    DIAGNOSE -->|generation or citation| REGENERATE --> VERIFY
-    DIAGNOSE -->|max attempts| ABSTAIN --> RESPONSE
-
-    subgraph Observability[Observability]
-        METRICS[Prometheus metrics]
-        TRACE[OTel / Langfuse traces]
-        HEALTH[Health · readiness · stats]
-    end
-
-    API -.-> METRICS
-    API -.-> TRACE
-    API -.-> HEALTH
-    RESPONSE --> API --> UI
+    RESPONSE --> UI
+    API -.-> OBS[Prometheus metrics<br/>OTel / Langfuse traces<br/>health, readiness, and stats]
 ```
 
 The self-healing branches run only when enabled globally or per query. Otherwise, generation and citations return directly to the API response.

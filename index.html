@@ -8,6 +8,7 @@
 </head>
 <body><div class="app">
   <aside class="sidebar"><div class="brand">RAG <span>Desk</span></div><button class="new-chat" id="newChat">+ New chat</button>
+    <button class="new-chat dash-open" id="openDash" type="button" title="Open the observability dashboard"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M2 14V8M6.5 14V2M11 14V6M14 14H1"/></svg>Observability</button>
     <div class="notice" id="uploadNotice"></div><input id="files" type="file" hidden><input id="keepDocs" type="checkbox" hidden><button id="upload" type="button" hidden></button>
     <div class="history-label">Your chats</div><nav id="history" aria-label="Chat history"></nav>
     <div class="side-footer"><details><summary>Retrieval options</summary><div class="options"><label>Top results <input id="topK" type="number" min="1" max="20" value="5"></label><div class="checks"><label><input id="hybrid" type="checkbox"> Hybrid</label><label><input id="reranker" type="checkbox"> Re-rank</label><label><input id="healing" type="checkbox"> Self-heal</label></div></div></details><details style="margin-top:9px"><summary>API access</summary><label class="options">Bearer token<input id="apiKey" type="text" placeholder="Optional"></label></details><div class="notice" id="stats"></div></div>
@@ -102,4 +103,477 @@ const $=id=>document.getElementById(id),STORE='rag-desk-chats-v1';let chats=JSON
       input.focus();
     }
   };
-</script></body></html>
+</script><style>
+  /* ---- Observability dashboard (dark; tokens from the dataviz reference palette) ---- */
+  .dash-open { display:flex; align-items:center; gap:9px; width:100%; text-align:left; }
+  .dash-open svg { flex:none; opacity:.85; }
+  .dash { --d-bg:#0d0d0d; --d-card:#161615; --d-line:#2c2c2a; --d-axis:#383835; --d-ink:#f0efec; --d-ink2:#c3c2b7; --d-muted:#898781;
+          --d-series:#3987e5; --d-good:#0ca30c; --d-warn:#fab219; --d-serious:#ec835a; --d-crit:#d03b3b;
+          position:fixed; inset:0; z-index:50; background:rgba(0,0,0,.72); overflow-y:auto; padding:28px 18px 48px;
+          font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif; color:var(--d-ink); }
+  .dash[hidden] { display:none; }
+  .dash-panel { max-width:1120px; margin:0 auto; background:var(--d-bg); border:1px solid var(--d-line); border-radius:14px; box-shadow:0 24px 60px #000a; }
+  .dash-head { display:flex; flex-wrap:wrap; gap:14px 24px; align-items:flex-start; justify-content:space-between; padding:20px 24px 16px; border-bottom:1px solid var(--d-line); }
+  .dash-head h2 { margin:0; font-size:20px; font-weight:650; }
+  .dash-head p { margin:3px 0 0; color:var(--d-ink2); font-size:13px; }
+  .dash-actions { display:flex; flex-wrap:wrap; gap:10px 14px; align-items:center; font-size:12.5px; color:var(--d-ink2); }
+  .dash-actions button { font:inherit; color:var(--d-ink); background:#1b1b1b; border:1px solid #303030; border-radius:8px; padding:6px 12px; cursor:pointer; }
+  .dash-actions button:hover { background:#242424; }
+  .dash-actions #dashClose { padding:6px 10px; }
+  .dash-toggle { display:flex; align-items:center; gap:6px; cursor:pointer; user-select:none; }
+  .dash-muted { color:var(--d-muted); font-size:12px; }
+  .dash-banner { margin:16px 24px 0; padding:10px 14px; border:1px solid var(--d-line); border-left:3px solid var(--d-serious); border-radius:8px; background:var(--d-card); color:var(--d-ink2); font-size:13px; }
+  .dash-body { padding:6px 24px 24px; transition:opacity .15s; }
+  .dash-body.loading { opacity:.6; }
+  .dash h3 { margin:26px 0 2px; font-size:15px; font-weight:650; }
+  .dash .dash-sub { margin:0 0 12px; color:var(--d-muted); font-size:12.5px; }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin-top:14px; }
+  .tile { background:var(--d-card); border:1px solid var(--d-line); border-radius:11px; padding:14px 16px; min-width:0; }
+  .tile .t-label { color:var(--d-ink2); font-size:12.5px; }
+  .tile .t-value { margin:4px 0 2px; font-size:30px; font-weight:650; line-height:1.15; letter-spacing:-.01em; overflow-wrap:anywhere; }
+  .tile .t-hint { color:var(--d-muted); font-size:12px; }
+  .chip { display:inline-flex; align-items:center; gap:5px; margin-top:6px; padding:2px 9px 2px 7px; border-radius:99px; border:1px solid var(--d-line); font-size:12px; color:var(--d-ink); }
+  .chip i { font-style:normal; font-weight:700; }
+  .chip.good i { color:var(--d-good); } .chip.warn i { color:var(--d-warn); } .chip.serious i { color:var(--d-serious); } .chip.crit i { color:var(--d-crit); }
+  .meter { height:8px; margin:9px 0 3px; background:#232322; border-radius:4px; overflow:hidden; }
+  .meter span { display:block; height:100%; background:var(--d-series); border-radius:0 4px 4px 0; }
+  .card { background:var(--d-card); border:1px solid var(--d-line); border-radius:11px; padding:14px 16px; }
+  .cols { display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:12px; }
+  .rows { display:grid; gap:2px; }
+  .row { display:grid; grid-template-columns:minmax(130px,230px) minmax(0,1fr); gap:12px; align-items:center; min-height:34px; padding:3px 6px; border-radius:7px; outline:none; }
+  .row:hover, .row:focus-visible { background:#1d1d1c; }
+  .row:focus-visible { box-shadow:0 0 0 2px var(--d-series); }
+  .row .r-name { min-width:0; } .row .r-name b { display:block; font-weight:500; overflow-wrap:anywhere; line-height:1.3; }
+  .row .r-name small { color:var(--d-muted); font-size:11.5px; }
+  .row .r-bar { display:flex; align-items:center; gap:10px; min-width:0; }
+  .row .r-track { flex:1; min-width:0; border-left:1px solid var(--d-axis); }
+  .row .r-fill { height:10px; background:var(--d-series); border-radius:0 4px 4px 0; min-width:2px; }
+  .row .r-val { flex:none; min-width:62px; font-variant-numeric:tabular-nums; color:var(--d-ink); font-size:13px; }
+  .stack { display:flex; gap:2px; height:14px; margin:6px 0 12px; }
+  .stack span { display:block; min-width:3px; }
+  .stack span:first-child { border-radius:4px 0 0 4px; } .stack span:last-child { border-radius:0 4px 4px 0; }
+  .legend { display:flex; flex-wrap:wrap; gap:8px 22px; font-size:13px; color:var(--d-ink2); }
+  .legend b { color:var(--d-ink); font-weight:600; }
+  .legend i { font-style:normal; font-weight:700; margin-right:4px; }
+  .legend .good i { color:var(--d-good); } .legend .warn i { color:var(--d-warn); } .legend .serious i { color:var(--d-serious); }
+  .mini { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; margin-bottom:14px; }
+  .mini div { background:#121211; border:1px solid var(--d-line); border-radius:9px; padding:9px 12px; }
+  .mini b { display:block; font-size:20px; font-weight:650; } .mini span { color:var(--d-muted); font-size:12px; }
+  .spark { display:block; max-width:100%; height:auto; touch-action:none; }
+  .spark text { fill:var(--d-muted); font-size:11px; font-family:inherit; }
+  .empty-note { color:var(--d-ink2); padding:6px 2px; }
+  table.dtab { width:100%; border-collapse:collapse; font-size:13px; }
+  table.dtab th, table.dtab td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--d-line); }
+  table.dtab th { color:var(--d-muted); font-weight:500; font-size:12px; } table.dtab td.num, table.dtab th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .chart-view, .table-view { display:block; } .table-view { display:none; }
+  .dash.tables .chart-view { display:none; } .dash.tables .table-view { display:block; }
+  dl.setup { display:grid; grid-template-columns:max-content 1fr; gap:6px 18px; margin:0; font-size:13px; }
+  dl.setup dt { color:var(--d-muted); } dl.setup dd { margin:0; overflow-wrap:anywhere; }
+  .gloss { margin-top:22px; color:var(--d-ink2); font-size:13px; } .gloss summary { cursor:pointer; color:var(--d-ink); font-weight:600; }
+  .gloss dt { margin-top:8px; color:var(--d-ink); font-weight:600; } .gloss dd { margin:2px 0 0; }
+  .dash-note { margin-top:18px; color:var(--d-muted); font-size:12px; }
+  .dash-tip { position:fixed; z-index:60; pointer-events:none; max-width:260px; padding:7px 10px; border-radius:8px; background:#222221; border:1px solid #3a3a37; color:var(--d-ink, #f0efec); font:12.5px/1.4 system-ui,sans-serif; box-shadow:0 8px 22px #000a; }
+  .dash-tip[hidden] { display:none; } .dash-tip b { display:block; margin-bottom:2px; }
+  @media (max-width:720px) { .dash { padding:0; } .dash-panel { border-radius:0; border:0; } .row { grid-template-columns:1fr; gap:3px; } .dash-head, .dash-body { padding-left:16px; padding-right:16px; } }
+  @media (prefers-reduced-motion:reduce) { .dash-body { transition:none; } }
+  @media (forced-colors:active) { .row .r-fill, .meter span, .stack span { forced-color-adjust:none; border:1px solid CanvasText; } }
+</style>
+
+<div id="dash" class="dash" role="dialog" aria-modal="true" aria-labelledby="dashTitle" hidden>
+  <div class="dash-panel">
+    <header class="dash-head">
+      <div>
+        <h2 id="dashTitle">Observability</h2>
+        <p>How healthy, fast and accurate your RAG service is right now.</p>
+      </div>
+      <div class="dash-actions">
+        <span id="dashUpdated" class="dash-muted">Not loaded yet</span>
+        <label class="dash-toggle"><input type="checkbox" id="dashAuto" checked> Auto-refresh</label>
+        <label class="dash-toggle"><input type="checkbox" id="dashTables"> Table view</label>
+        <button type="button" id="dashRefresh">Refresh</button>
+        <button type="button" id="dashClose" aria-label="Close dashboard">&#x2715;</button>
+      </div>
+    </header>
+    <div id="dashBanner" class="dash-banner" hidden></div>
+    <div id="dashBody" class="dash-body">
+      <div class="kpis" id="dKpis"></div>
+
+      <h3>Is it fast enough?</h3>
+      <p class="dash-sub">Average time each action takes to finish. Asking a question includes the AI model's thinking time, so it is normally the slowest.</p>
+      <div class="card"><div id="dLatency"></div></div>
+
+      <h3>Is anyone using it?</h3>
+      <p class="dash-sub">Requests handled between each refresh while this window stays open (health checks and this dashboard are not counted).</p>
+      <div class="card"><div id="dTraffic"></div></div>
+
+      <h3>Are the answers any good?</h3>
+      <p class="dash-sub">Self-healing checks every answer against its sources and retries when something looks wrong. Turn it on with "Self-heal" under Retrieval options.</p>
+      <div id="dQuality"></div>
+
+      <h3>What is it running on?</h3>
+      <div class="card"><dl class="setup" id="dSetup"></dl></div>
+
+      <details class="gloss">
+        <summary>What do these words mean?</summary>
+        <dl>
+          <dt>Average response time</dt><dd>The usual time one request takes from start to finish.</dd>
+          <dt>Slowest 5% (p95)</dt><dd>95 out of 100 requests finish at least this fast. It shows how bad the slow ones get, which the average hides. It is estimated from timing buckets, so it is approximate.</dd>
+          <dt>Error rate</dt><dd>Share of requests that failed because of a server problem (HTTP 5xx). Rejected requests, such as a missing API key or too many requests (4xx), are counted separately.</dd>
+          <dt>Chunks indexed</dt><dd>Pieces of your documents stored for searching. More chunks means a bigger knowledge base.</dd>
+          <dt>Cache hit rate</dt><dd>How often a repeated question reused an earlier computation instead of running the embedding model again. Higher is faster and cheaper.</dd>
+          <dt>Self-healing outcomes</dt><dd><b>Passed first time</b>: the answer was verified immediately. <b>Recovered</b>: it failed a check, was repaired and then passed. <b>Declined</b>: it could not be verified after retrying, so the service said so instead of guessing.</dd>
+        </dl>
+      </details>
+      <p class="dash-note">Counts are totals since the server last started. Traces and cost data from OpenTelemetry or Langfuse, when enabled, are sent to that tool and do not appear here.</p>
+    </div>
+  </div>
+</div>
+<div id="dashTip" class="dash-tip" role="tooltip" hidden></div>
+
+<script id="obsLib">
+  /* Pure helpers (no DOM): Prometheus text parsing and summarising. */
+  const Obs = (() => {
+    const SYSTEM_PATHS = new Set(['/metrics', '/stats', '/healthz', '/readyz', '/', '/index.html', '/favicon.ico']);
+    const FRIENDLY = {
+      '/query': 'Ask a question', '/query/stream': 'Ask a question (streaming)', '/upload': 'Upload a PDF',
+      '/ingest': 'Index a document', '/ingest/async': 'Index in the background',
+    };
+    const FAILURES = {
+      RETRIEVAL_FAILURE: 'Found the wrong passages', QUERY_FAILURE: 'Question was unclear',
+      CONTEXT_FAILURE: 'Not enough context given to the model', GENERATION_FAILURE: 'Answer did not match its sources',
+      CITATION_FAILURE: 'Citations missing or wrong', UNKNOWN_FAILURE: 'Cause not identified',
+    };
+
+    function parseLabels(text) {
+      const labels = {};
+      const re = /([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"/g;
+      let m;
+      while ((m = re.exec(text))) labels[m[1]] = m[2].replace(/\\(["\\n])/g, (_, c) => (c === 'n' ? '\n' : c));
+      return labels;
+    }
+
+    function parseProm(text) {
+      const samples = [];
+      for (const line of text.split('\n')) {
+        if (!line || line[0] === '#') continue;
+        const m = line.match(/^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(.*)\})?\s+(\S+)/);
+        if (!m) continue;
+        const raw = m[3];
+        const value = raw === '+Inf' ? Infinity : raw === '-Inf' ? -Infinity : parseFloat(raw);
+        if (Number.isNaN(value)) continue;
+        samples.push({ name: m[1], labels: m[2] ? parseLabels(m[2]) : {}, value });
+      }
+      return samples;
+    }
+
+    /* Estimate a quantile from cumulative histogram buckets [[upperBound, cumulativeCount], ...]. */
+    function quantile(buckets, q) {
+      const sorted = [...buckets].sort((a, b) => a[0] - b[0]);
+      if (!sorted.length) return null;
+      const total = sorted[sorted.length - 1][1];
+      if (!total) return null;
+      const target = q * total;
+      let prevLe = 0, prevCum = 0;
+      for (const [le, cum] of sorted) {
+        if (cum >= target) {
+          if (!Number.isFinite(le)) return prevLe;
+          const span = cum - prevCum;
+          return span <= 0 ? le : prevLe + (le - prevLe) * ((target - prevCum) / span);
+        }
+        prevLe = le; prevCum = cum;
+      }
+      return prevLe;
+    }
+
+    const addBucket = (map, le, v) => map.set(le, (map.get(le) || 0) + v);
+    const toBuckets = map => [...map.entries()];
+
+    function summarize(samples) {
+      const paths = new Map();
+      const all = { requests: 0, ok: 0, clientErr: 0, serverErr: 0, sum: 0, count: 0, buckets: new Map() };
+      const get = p => {
+        if (!paths.has(p)) paths.set(p, { path: p, requests: 0, ok: 0, clientErr: 0, serverErr: 0, sum: 0, count: 0, buckets: new Map() });
+        return paths.get(p);
+      };
+      const heal = { outcomes: {}, failures: {}, repairs: { rewrites: 0, retries: 0, regenerations: 0 }, attempts: { sum: 0, count: 0 }, latency: { sum: 0, count: 0 }, seen: false };
+
+      for (const s of samples) {
+        const p = s.labels.path;
+        if (s.name.startsWith('rag_http_') && p !== undefined && !SYSTEM_PATHS.has(p)) {
+          const e = get(p);
+          if (s.name === 'rag_http_requests_total') {
+            const code = Number(s.labels.status_code);
+            for (const t of [e, all]) {
+              t.requests += s.value;
+              if (code >= 500) t.serverErr += s.value; else if (code >= 400) t.clientErr += s.value; else t.ok += s.value;
+            }
+          } else if (s.name === 'rag_http_request_duration_seconds_sum') { e.sum += s.value; all.sum += s.value; }
+          else if (s.name === 'rag_http_request_duration_seconds_count') { e.count += s.value; all.count += s.value; }
+          else if (s.name === 'rag_http_request_duration_seconds_bucket') {
+            const le = s.labels.le === '+Inf' ? Infinity : parseFloat(s.labels.le);
+            addBucket(e.buckets, le, s.value); addBucket(all.buckets, le, s.value);
+          }
+        } else if (s.name === 'rag_healing_queries_total') { heal.outcomes[s.labels.outcome] = s.value; heal.seen = true; }
+        else if (s.name === 'rag_healing_failures_total') { heal.failures[s.labels.failure_type] = s.value; heal.seen = true; }
+        else if (s.name === 'rag_healing_query_rewrites_total') heal.repairs.rewrites = s.value;
+        else if (s.name === 'rag_healing_retrieval_retries_total') heal.repairs.retries = s.value;
+        else if (s.name === 'rag_healing_regenerations_total') heal.repairs.regenerations = s.value;
+        else if (s.name === 'rag_healing_attempts_sum') heal.attempts.sum = s.value;
+        else if (s.name === 'rag_healing_attempts_count') heal.attempts.count = s.value;
+        else if (s.name === 'rag_healing_latency_seconds_sum') heal.latency.sum = s.value;
+        else if (s.name === 'rag_healing_latency_seconds_count') heal.latency.count = s.value;
+      }
+
+      const finish = t => ({
+        ...t,
+        avg: t.count ? t.sum / t.count : null,
+        p95: quantile(toBuckets(t.buckets), 0.95),
+      });
+      const endpoints = [...paths.values()].filter(e => e.requests > 0)
+        .map(finish).sort((a, b) => b.requests - a.requests)
+        .map(e => ({ ...e, name: FRIENDLY[e.path] || e.path }));
+      const askPaths = ['/query', '/query/stream'];
+      const asked = endpoints.filter(e => askPaths.includes(e.path)).reduce((n, e) => n + e.ok, 0);
+      return { total: finish(all), endpoints, asked, heal };
+    }
+
+    return { parseProm, quantile, summarize, FAILURES, FRIENDLY };
+  })();
+</script>
+
+<script id="obsUi">
+  (() => {
+    const $d = id => document.getElementById(id);
+    const dash = $d('dash'), body = $d('dashBody'), tip = $d('dashTip');
+    let timer = null, opener = null, previous = null;
+    const history = [];                       // [{t, total, serverErr}] one per successful refresh
+    const MAX_HISTORY = 60, REFRESH_MS = 5000;
+
+    const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text !== undefined) n.textContent = text; return n; };
+    const num = n => Math.round(n).toLocaleString();
+    const ms = s => s === null || s === undefined ? '–' : s < 1 ? `${Math.round(s * 1000)} ms` : `${s.toFixed(s < 10 ? 2 : 1)} s`;
+    const pct = (a, b) => b > 0 ? `${(100 * a / b).toFixed(a / b < 0.1 && a > 0 ? 1 : 0)}%` : '–';
+    const clock = d => d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+    /* ---------- tooltip (enhances; every value is also visible in labels or the table view) ---------- */
+    function showTip(target, title, lines) {
+      tip.replaceChildren(el('b', '', title), ...lines.map(l => el('div', '', l)));
+      tip.hidden = false;
+      const r = target.getBoundingClientRect(), w = tip.offsetWidth, h = tip.offsetHeight;
+      tip.style.left = `${Math.min(Math.max(8, r.left + 14), window.innerWidth - w - 8)}px`;
+      tip.style.top = `${r.top - h - 8 < 8 ? r.bottom + 8 : r.top - h - 8}px`;
+    }
+    const hideTip = () => { tip.hidden = true; };
+
+    function statusChip(kind, icon, text) {
+      const c = el('span', `chip ${kind}`); c.append(el('i', '', icon), document.createTextNode(text)); return c;
+    }
+    function tile(label, value, hint, extra) {
+      const t = el('div', 'tile');
+      t.append(el('div', 't-label', label), el('div', 't-value', value), el('div', 't-hint', hint));
+      if (extra) t.append(extra);
+      return t;
+    }
+    function table(headers, rows) {
+      const t = el('table', 'dtab'), thead = el('thead'), head = el('tr');
+      headers.forEach((h, i) => head.append(el('th', i ? 'num' : '', h)));
+      thead.append(head); t.append(thead);
+      const tb = el('tbody');
+      rows.forEach(r => { const tr = el('tr'); r.forEach((c, i) => tr.append(el('td', i ? 'num' : '', c))); tb.append(tr); });
+      t.append(tb); return t;
+    }
+    function both(chart, tbl) {
+      const w = el('div'); const a = el('div', 'chart-view'), b = el('div', 'table-view'); a.append(chart); b.append(tbl); w.append(a, b); return w;
+    }
+
+    /* Horizontal bars: one series, one colour (identity is the row label), values labelled at the bar end. */
+    function bars(items, fmt, detail) {
+      const max = Math.max(...items.map(i => i.value), 0) || 1;
+      const wrap = el('div', 'rows');
+      items.forEach(i => {
+        const row = el('div', 'row'); row.tabIndex = 0;
+        const name = el('div', 'r-name'); name.append(el('b', '', i.label)); if (i.sub) name.append(el('small', '', i.sub));
+        const track = el('div', 'r-track'), fill = el('div', 'r-fill'); fill.style.width = `${Math.max(1, 100 * i.value / max)}%`; track.append(fill);
+        const bar = el('div', 'r-bar'); bar.append(track, el('span', 'r-val', fmt(i.value)));
+        row.append(name, bar);
+        const show = () => showTip(row, i.label, detail(i));
+        row.addEventListener('mouseenter', show); row.addEventListener('focus', show);
+        row.addEventListener('mouseleave', hideTip); row.addEventListener('blur', hideTip);
+        wrap.append(row);
+      });
+      return wrap;
+    }
+
+    /* ---------- sections ---------- */
+    function renderKpis(model, stats, healthy) {
+      const k = $d('dKpis'); k.replaceChildren();
+      const t = model.total;
+      k.append(tile('Service', healthy ? 'Healthy' : 'Unreachable', healthy ? 'The server answered its health check.' : 'The server did not answer its health check.',
+        healthy ? statusChip('good', '\u2713', 'Online') : statusChip('crit', '\u2715', 'Offline')));
+
+      k.append(tile('Questions answered', num(model.asked), t.requests ? `Out of ${num(t.requests)} requests in total.` : 'No requests yet. Ask something in the chat.'));
+
+      const rate = t.requests ? t.serverErr / t.requests : 0;
+      const chip = !t.requests ? null : rate < 0.01 ? statusChip('good', '\u2713', 'Healthy') : rate < 0.05 ? statusChip('warn', '\u25B2', 'Watch') : statusChip('crit', '\u2715', 'Problem');
+      k.append(tile('Error rate', t.requests ? pct(t.serverErr, t.requests) : '–',
+        t.requests ? `${num(t.serverErr)} server errors, ${num(t.clientErr)} rejected requests. Under 1% is healthy.` : 'Nothing to measure yet.', chip));
+
+      k.append(tile('Average response time', ms(t.avg),
+        t.p95 === null ? 'Needs a few requests first.' : `The slowest 5% take about ${ms(t.p95)} or longer.`));
+
+      k.append(tile('Chunks indexed', stats ? num(stats.chunks_in_store) : '–', stats ? 'Pieces of your documents available for search.' : 'Could not load statistics.'));
+
+      const hits = stats ? stats.embedding_cache_hits : 0, miss = stats ? stats.embedding_cache_misses : 0, seen = hits + miss;
+      const meter = el('div', 'meter'); const fillBar = el('span'); fillBar.style.width = `${seen ? 100 * hits / seen : 0}%`; meter.append(fillBar);
+      k.append(tile('Cache hit rate', seen ? pct(hits, seen) : '–',
+        seen ? `${num(hits)} repeat questions reused earlier work; ${num(miss)} were new.` : 'No questions embedded yet.', seen ? meter : null));
+    }
+
+    function renderLatency(model) {
+      const host = $d('dLatency'); host.replaceChildren();
+      if (!model.endpoints.length) { host.append(el('p', 'empty-note', 'No requests recorded yet. Upload a PDF or ask a question and this fills in.')); return; }
+      const items = model.endpoints.map(e => ({ label: e.name, sub: e.name === e.path ? '' : e.path, value: e.avg || 0, e }));
+      const chart = bars(items, v => ms(v), i => [`Average: ${ms(i.e.avg)}`, `Slowest 5%: ${i.e.p95 === null ? '–' : `about ${ms(i.e.p95)}`}`, `${num(i.e.requests)} requests, ${num(i.e.serverErr)} errors`]);
+      const tbl = table(['Action', 'Requests', 'Average', 'Slowest 5%', 'Errors'], model.endpoints.map(e => [e.name, num(e.requests), ms(e.avg), e.p95 === null ? '–' : `~${ms(e.p95)}`, num(e.serverErr)]));
+      host.append(both(chart, tbl));
+    }
+
+    function renderTraffic() {
+      const host = $d('dTraffic'); host.replaceChildren();
+      const pts = history.slice(1).map((h, i) => ({ t: h.t, v: Math.max(0, h.total - history[i].total) }));
+      if (pts.length < 2) { host.append(el('p', 'empty-note', 'Collecting data\u2026 keep this window open with auto-refresh on and a chart will appear after a few refreshes.')); return; }
+      const W = Math.max(320, Math.round(host.clientWidth) || 640), H = 170, L = 34, R = 12, T = 12, B = 26, max = Math.max(1, ...pts.map(p => p.v));
+      const x = i => L + (W - L - R) * i / (pts.length - 1), y = v => T + (H - T - B) * (1 - v / max);
+      const NS = 'http://www.w3.org/2000/svg', s = (tag, attrs) => { const n = document.createElementNS(NS, tag); for (const k in attrs) n.setAttribute(k, attrs[k]); return n; };
+      const svg = s('svg', { viewBox: `0 0 ${W} ${H}`, width: W, height: H, class: 'spark', role: 'img', 'aria-label': `Requests per refresh, latest ${pts[pts.length - 1].v}` });
+      [0, max].forEach(v => {
+        svg.append(s('line', { x1: L, x2: W - R, y1: y(v), y2: y(v), stroke: v === 0 ? '#383835' : '#2c2c2a', 'stroke-width': 1 }));
+        const lab = s('text', { x: L - 6, y: y(v) + 4, 'text-anchor': 'end' }); lab.textContent = num(v); svg.append(lab);
+      });
+      [0, pts.length - 1].forEach(i => { const lab = s('text', { x: x(i), y: H - 6, 'text-anchor': i ? 'end' : 'start' }); lab.textContent = clock(pts[i].t); svg.append(lab); });
+      svg.append(s('polyline', { points: pts.map((p, i) => `${x(i)},${y(p.v)}`).join(' '), fill: 'none', stroke: '#3987e5', 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round' }));
+      const last = pts.length - 1;
+      if (pts.length <= 15) pts.forEach((p, i) => { if (i !== last) svg.append(s('circle', { cx: x(i), cy: y(p.v), r: 4, fill: '#3987e5', stroke: '#161615', 'stroke-width': 2 })); });
+      svg.append(s('circle', { cx: x(last), cy: y(pts[last].v), r: 4.5, fill: '#3987e5', stroke: '#161615', 'stroke-width': 2 }));
+      const cross = s('line', { y1: T, y2: H - B, stroke: '#898781', 'stroke-width': 1, visibility: 'hidden' }), dot = s('circle', { r: 5, fill: '#3987e5', stroke: '#161615', 'stroke-width': 2, visibility: 'hidden' });
+      svg.append(cross, dot);
+      const hit = s('rect', { x: L, y: 0, width: W - L - R, height: H, fill: 'transparent', tabindex: 0 });
+      const at = clientX => {
+        const r = svg.getBoundingClientRect(), px = (clientX - r.left) * W / r.width;
+        const i = Math.min(last, Math.max(0, Math.round((px - L) / ((W - L - R) / last))));
+        cross.setAttribute('x1', x(i)); cross.setAttribute('x2', x(i)); cross.setAttribute('visibility', 'visible');
+        dot.setAttribute('cx', x(i)); dot.setAttribute('cy', y(pts[i].v)); dot.setAttribute('visibility', 'visible');
+        showTip(Object.assign(document.createElement('i'), { getBoundingClientRect: () => ({ left: r.left + x(i) * r.width / W, right: r.left + x(i) * r.width / W, top: r.top + y(pts[i].v) * r.height / H, bottom: r.top + y(pts[i].v) * r.height / H }) }), clock(pts[i].t), [`${num(pts[i].v)} requests`]);
+      };
+      hit.addEventListener('mousemove', e => at(e.clientX)); hit.addEventListener('touchmove', e => at(e.touches[0].clientX));
+      hit.addEventListener('mouseleave', () => { cross.setAttribute('visibility', 'hidden'); dot.setAttribute('visibility', 'hidden'); hideTip(); });
+      hit.addEventListener('keydown', e => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); const r = svg.getBoundingClientRect(); at(r.left + r.width * (x(last) / W)); } });
+      svg.append(hit);
+      const tbl = table(['Time', 'Requests'], pts.slice().reverse().slice(0, 20).map(p => [clock(p.t), num(p.v)]));
+      host.append(both(svg, tbl));
+    }
+
+    function renderQuality(model) {
+      const host = $d('dQuality'); host.replaceChildren();
+      const h = model.heal, o = h.outcomes, total = (o.passed || 0) + (o.recovered || 0) + (o.abstained || 0);
+      if (!h.seen || !total) {
+        const c = el('div', 'card'); c.append(el('p', 'empty-note', 'Self-healing has not run yet. Tick "Self-heal" under Retrieval options, ask a question, then refresh.')); host.append(c); return;
+      }
+      const cols = el('div', 'cols'), left = el('div', 'card'), right = el('div', 'card');
+      const defs = [['good', '\u2713', 'Passed first time', o.passed || 0, '#0ca30c'], ['warn', '\u21BB', 'Recovered after repair', o.recovered || 0, '#fab219'], ['serious', '!', 'Declined to answer', o.abstained || 0, '#ec835a']];
+      const stack = el('div', 'stack'); stack.setAttribute('role', 'img'); stack.setAttribute('aria-label', defs.map(d => `${d[2]}: ${d[3]}`).join(', '));
+      defs.filter(d => d[3]).forEach(d => { const seg = el('span'); seg.style.flex = String(d[3]); seg.style.background = d[4]; seg.title = `${d[2]}: ${num(d[3])}`; stack.append(seg); });
+      const legend = el('div', 'legend');
+      defs.forEach(d => { const it = el('span', d[0]); it.append(el('i', '', d[1]), document.createTextNode(`${d[2]} `), el('b', '', `${num(d[3])} (${pct(d[3], total)})`)); legend.append(it); });
+      left.append(el('div', 't-label', `Outcome of ${num(total)} checked answers`), stack, legend);
+      const mini = el('div', 'mini'); mini.style.marginTop = '16px'; mini.style.marginBottom = '0';
+      [[h.attempts.count ? (h.attempts.sum / h.attempts.count).toFixed(1) : '–', 'Average attempts per answer'], [h.latency.count ? ms(h.latency.sum / h.latency.count) : '–', 'Average time per checked answer']]
+        .forEach(([v, l]) => { const d = el('div'); d.append(el('b', '', v), el('span', '', l)); mini.append(d); });
+      left.append(mini);
+
+      right.append(el('div', 't-label', 'Repairs the system made'));
+      const repairs = el('div', 'mini'); repairs.style.marginTop = '8px';
+      [[h.repairs.rewrites, 'Questions reworded'], [h.repairs.retries, 'Searches repeated'], [h.repairs.regenerations, 'Answers rewritten']].forEach(([v, l]) => { const d = el('div'); d.append(el('b', '', num(v)), el('span', '', l)); repairs.append(d); });
+      right.append(repairs, el('div', 't-label', 'What went wrong most often'));
+      const causes = Object.entries(h.failures).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).map(([k, v]) => ({ label: Obs.FAILURES[k] || k, value: v }));
+      if (causes.length) {
+        right.append(both(bars(causes, v => num(v), i => [`${num(i.value)} failed checks`]), table(['Cause', 'Failed checks'], causes.map(c => [c.label, num(c.value)]))));
+      } else right.append(el('p', 'empty-note', 'No failed checks so far.'));
+      cols.append(left, right); host.append(cols);
+    }
+
+    function renderSetup(stats) {
+      const dl = $d('dSetup'); dl.replaceChildren();
+      if (!stats) { dl.append(el('dt', '', 'Status'), el('dd', '', 'Could not load /stats.')); return; }
+      [['Answer model', `${stats.llm_model} (${stats.llm_provider})`], ['Search embedding model', stats.embedding_model],
+       ['Chunk size', `${num(stats.chunk_size)} characters, ${num(stats.chunk_overlap)} overlap`], ['Chunks indexed', num(stats.chunks_in_store)]]
+        .forEach(([k, v]) => dl.append(el('dt', '', k), el('dd', '', v)));
+    }
+
+    /* ---------- loading ---------- */
+    function banner(msg) { const b = $d('dashBanner'); b.hidden = !msg; b.textContent = msg || ''; }
+
+    async function load() {
+      body.classList.add('loading');
+      const opts = { headers: headers() };
+      const [health, stats, metrics] = await Promise.allSettled([fetch('/healthz'), fetch('/stats', opts), fetch('/metrics', opts)]);
+      body.classList.remove('loading');
+      const healthy = health.status === 'fulfilled' && health.value.ok;
+      const denied = [stats, metrics].some(r => r.status === 'fulfilled' && (r.value.status === 401 || r.value.status === 403));
+      let statsJson = null, text = null;
+      try { if (stats.status === 'fulfilled' && stats.value.ok) statsJson = await stats.value.json(); } catch { /* shown as unavailable */ }
+      try { if (metrics.status === 'fulfilled' && metrics.value.ok) text = await metrics.value.text(); } catch { /* shown as unavailable */ }
+
+      if (denied) banner('The server needs an API key. Enter it under "API access" in the sidebar, then press Refresh.');
+      else if (!healthy) banner('Cannot reach the server. The numbers below may be out of date.');
+      else if (text === null) banner('The metrics endpoint did not respond, so request and quality numbers are unavailable.');
+      else banner('');
+
+      if (text !== null) {
+        const model = Obs.summarize(Obs.parseProm(text)); previous = model;
+        history.push({ t: new Date(), total: model.total.requests }); if (history.length > MAX_HISTORY) history.shift();
+        if (history.length > 1 && history[history.length - 1].total < history[history.length - 2].total) history.splice(0, history.length - 1); // server restarted
+      }
+      if (previous) { renderKpis(previous, statsJson, healthy); renderLatency(previous); renderTraffic(); renderQuality(previous); }
+      renderSetup(statsJson);
+      $d('dashUpdated').textContent = `Updated ${clock(new Date())}`;
+    }
+
+    function schedule() {
+      clearInterval(timer); timer = null;
+      if (!dash.hidden && $d('dashAuto').checked) timer = setInterval(() => { if (!document.hidden) load(); }, REFRESH_MS);
+    }
+
+    /* ---------- open / close ---------- */
+    function open() {
+      opener = document.activeElement; dash.hidden = false; document.body.style.overflow = 'hidden';
+      history.length = 0; previous = null; $d('dashClose').focus();
+      if (location.hash !== '#observability') window.history.replaceState(null, '', '#observability');
+      load(); schedule();
+    }
+    function close() {
+      dash.hidden = true; document.body.style.overflow = ''; hideTip(); clearInterval(timer); timer = null;
+      if (location.hash === '#observability') window.history.replaceState(null, '', location.pathname + location.search);
+      if (opener && opener.focus) opener.focus();
+    }
+    $d('openDash').addEventListener('click', open);
+    $d('dashClose').addEventListener('click', close);
+    $d('dashRefresh').addEventListener('click', load);
+    $d('dashAuto').addEventListener('change', schedule);
+    $d('dashTables').addEventListener('change', e => dash.classList.toggle('tables', e.target.checked));
+    dash.addEventListener('mousedown', e => { if (e.target === dash) close(); });
+    document.addEventListener('keydown', e => {
+      if (dash.hidden) return;
+      if (e.key === 'Escape') { close(); return; }
+      if (e.key !== 'Tab') return;
+      const f = [...dash.querySelectorAll('button, input, summary, [tabindex="0"]')].filter(n => n.offsetParent !== null);
+      if (!f.length) return;
+      const first = f[0], last = f[f.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    });
+    window.addEventListener('hashchange', () => { if (location.hash === '#observability' && dash.hidden) open(); });
+    if (location.hash === '#observability') open();
+  })();
+</script>
+</body></html>
