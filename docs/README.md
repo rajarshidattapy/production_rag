@@ -6,7 +6,7 @@ A production-ready **Retrieval-Augmented Generation (RAG)** system built with Fa
 
 ---
 
-## Architecture
+## High-level overview
 
 ```
 Documents → [Loader → Chunker] → ChromaDB (dense)
@@ -20,7 +20,99 @@ Query → Language detection → HybridRetriever (RRF fusion)
                            Answer + Citations + OTel traces
 ```
 
-### Self-Healing Loop (Phase 4, opt-in)
+## Architecture
+
+```mermaid
+flowchart TB
+    UI[Browser UI<br/>PDF upload · chat · local chat history]
+    API[FastAPI API<br/>auth · CORS · request IDs · rate/error handling]
+
+    UI -->|POST /upload| API
+    UI -->|POST /ingest or /ingest/async| API
+    UI -->|POST /query or /query/stream| API
+
+    subgraph Ingestion[Ingestion pipeline]
+        UPLOAD[Save PDF under data/uploads]
+        GUARD[Validate path, type, file size, and page limit]
+        LOAD[DocumentLoader<br/>PDF · TXT · MD · JSON]
+        CHUNK[Recursive Chunker<br/>chunk size + overlap]
+        LANG_DOC[Language detection<br/>en · de · es]
+        EMBED[Sentence-transformer embeddings]
+        BATCH[Batch + retry writes]
+    end
+
+    API --> UPLOAD --> GUARD --> LOAD --> CHUNK --> LANG_DOC --> EMBED --> BATCH
+
+    subgraph Storage[Persistent retrieval storage]
+        CHROMA[(ChromaDB<br/>per-language dense collections)]
+        BM25[(BM25 sparse index<br/>journal + persistence)]
+    end
+
+    BATCH --> CHROMA
+    CHUNK --> BM25
+
+    subgraph Query[Query and retrieval pipeline]
+        VALIDATE[Validate question length]
+        LANG_Q[Detect query language]
+        CACHE[Query embedding LRU cache]
+        DENSE[Dense vector search]
+        SPARSE[Optional BM25 search]
+        FUSE[Optional RRF hybrid fusion]
+        RERANK[Optional cross-encoder reranker]
+        BUDGET[Context budget guardrail]
+    end
+
+    API --> VALIDATE --> LANG_Q --> CACHE --> DENSE
+    LANG_Q --> SPARSE
+    DENSE --> FUSE
+    SPARSE --> FUSE
+    FUSE --> RERANK --> BUDGET
+    CHROMA --> DENSE
+    BM25 --> SPARSE
+
+    subgraph Generation[Generation and citations]
+        PROMPT[Grounded system prompt<br/>context + source references]
+        LLM[LLM client<br/>OpenAI · OpenRouter · Anthropic]
+        CITE[Build citations]
+    end
+
+    BUDGET --> PROMPT --> LLM --> CITE
+
+    subgraph Healing[Optional self-healing loop]
+        HEAL_ENABLED{Self-healing enabled?}
+        VERIFY{Verifier<br/>deterministic checks + LLM judge}
+        DIAGNOSE{Failure diagnosis}
+        REWRITE[Rewrite query<br/>wider retrieval · rebalanced hybrid]
+        EXPAND[Expand context budget]
+        REGENERATE[Regenerate with repair prompt]
+        ABSTAIN[Structured abstention<br/>after max attempts]
+    end
+
+    CITE --> HEAL_ENABLED
+    HEAL_ENABLED -->|no| RESPONSE[Answer + citations + usage metadata]
+    HEAL_ENABLED -->|yes| VERIFY
+    VERIFY -->|passed| RESPONSE
+    VERIFY -->|failed| DIAGNOSE
+    DIAGNOSE -->|retrieval or query| REWRITE --> LANG_Q
+    DIAGNOSE -->|context| EXPAND --> DENSE
+    DIAGNOSE -->|generation or citation| REGENERATE --> VERIFY
+    DIAGNOSE -->|max attempts| ABSTAIN --> RESPONSE
+
+    subgraph Observability[Observability]
+        METRICS[Prometheus metrics]
+        TRACE[OTel / Langfuse traces]
+        HEALTH[Health · readiness · stats]
+    end
+
+    API -.-> METRICS
+    API -.-> TRACE
+    API -.-> HEALTH
+    RESPONSE --> API --> UI
+```
+
+The self-healing branches run only when enabled globally or per query. Otherwise, generation and citations return directly to the API response.
+
+### Self-healing detail (Phase 4, opt-in)
 
 ```mermaid
 flowchart TD
