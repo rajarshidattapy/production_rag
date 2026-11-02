@@ -16,8 +16,6 @@ def api_client() -> TestClient:
 
 
 def test_query_response_usage_headers(api_client: TestClient) -> None:
-    """Verify that response headers contain token usage metrics and LLM latency."""
-    # Mock LLMClient.complete_async to return custom response and register usage stats
     mock_complete = MagicMock()
     mock_response = MagicMock()
     mock_response.choices = [MagicMock(message=MagicMock(content="Mocked LLM response."))]

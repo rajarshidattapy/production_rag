@@ -8,6 +8,7 @@
 - **Next scaling steps:** API replicas, a response cache, a GPU or separate reranker, and Qdrant only if Chroma proves to be the bottleneck.
 
 - **Formatting and type errors:** `ruff format` still flags [`generator.py`](http://generator.py), `[test_healing_](#orca-native-chat-file=test_healing_evaluation.py)[evaluation.py](http://evaluation.py)` and `[test_](#orca-native-chat-file=test_pipeline.py)[pipeline.py](http://pipeline.py)`, and `mypy` still reports 59 errors in untouched files, which I left alone.
+- add graphify internally
 
 
 
