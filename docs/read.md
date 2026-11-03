@@ -8,7 +8,11 @@
 - **Next scaling steps:** API replicas, a response cache, a GPU or separate reranker, and Qdrant only if Chroma proves to be the bottleneck.
 
 - **Formatting and type errors:** `ruff format` still flags [`generator.py`](http://generator.py), `[test_healing_](#orca-native-chat-file=test_healing_evaluation.py)[evaluation.py](http://evaluation.py)` and `[test_](#orca-native-chat-file=test_pipeline.py)[pipeline.py](http://pipeline.py)`, and `mypy` still reports 59 errors in untouched files, which I left alone.
-- add graphify internally
+- Hybrid retrieval flow doesn't clearly distinguish dense vector search, BM25 retrieval and RRF fusion as separate operations.
+- Cross-encoder reranking is optional, but the diagram can make it appear mandatory.
+- Self-healing architecture oversimplifies the actual state machine: query analysis, failure classification, adaptive retrieval, query rewriting and bounded retries deserve explicit representation.
+- Citation generation, citation metadata construction and citation verification are different operations and aren't sufficiently distinguished.
+- Observability is represented too narrowly instead of showing instrumentation across the entire pipeline.
 
 
 
@@ -45,35 +49,28 @@ small llms (distil models)
 
 
 
-&nbsp;
-
-### Your RAG gives wrong answers. Debug it
-
 Learn about:
 
-
-
-1. BM25 vs dense vs hybrid search: when to use each
-2. Add a reranker and measure if it helped
-3. Reduce LLM cost by 70% without hurting quality
-4. Cut first-token latency for a chat app
-5. Design a semantic cache with hit-rate tracking
-6. Route requests between a cheap and a smart model
-7. Build an agent that uses tools reliably
-8. Your agent gets stuck in a loop. Fix it
-9. Design memory for a long-running assistant
-10. Make LLM output always valid JSON
-11. Detect and reduce hallucinations
-12. Build an eval suite for a customer support bot
-13. LLM-as-a-judge: how to make it trustworthy
-14. Block prompt injection in a tool-using agent
-15. Redact PII before it hits the model
-16. Fine-tune vs RAG vs prompting: pick one and defend it
-17. Fine-tune a small model with LoRA on 5K examples
-18. Serve an open model at scale (batching, KV cache, quantization)
-19. Stream responses over SSE and handle disconnects
-20. Trace every step of a multi-agent workflow
-21. Roll back a bad prompt change in production
+1. Add a reranker and measure if it helped
+2. Reduce LLM cost by 70% without hurting quality
+3. Cut first-token latency for a chat app
+4. Design a semantic cache with hit-rate tracking
+5. Route requests between a cheap and a smart model
+6. Build an agent that uses tools reliably
+7. Your agent gets stuck in a loop. Fix it
+8. Design memory for a long-running assistant
+9. Make LLM output always valid JSON
+10. Detect and reduce hallucinations
+11. Build an eval suite for a customer support bot
+12. LLM-as-a-judge: how to make it trustworthy
+13. Block prompt injection in a tool-using agent
+14. Redact PII before it hits the model
+15. Fine-tune vs RAG vs prompting: pick one and defend it
+16. Fine-tune a small model with LoRA on 5K examples
+17. Serve an open model at scale (batching, KV cache, quantization)
+18. Stream responses over SSE and handle disconnects
+19. Trace every step of a multi-agent workflow
+20. Roll back a bad prompt change in production
 
 
 

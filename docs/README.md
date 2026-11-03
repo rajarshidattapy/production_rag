@@ -2,71 +2,130 @@
 
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
 
-A production-ready **Retrieval-Augmented Generation (RAG)** system built with FastAPI, ChromaDB, and dual LLM support (OpenAI + Anthropic). Demonstrates the full spectrum from a clean vector-search baseline to advanced hybrid retrieval, cross-encoder reranking, OpenTelemetry metrics, Langfuse tracing, and LLM-as-Judge evaluation — all wired together in a deployable, observable, and testable package.
+A **Retrieval-Augmented Generation (RAG)** service built with FastAPI, ChromaDB, and OpenAI, OpenRouter, or Anthropic models. It goes from a vector-search baseline to optional hybrid retrieval, optional cross-encoder reranking, optional self-healing, and LLM-as-judge evaluation, with Prometheus metrics in the HTTP service and an OpenTelemetry/Langfuse instrumentation wrapper for library use.
+
+**Status:** production-oriented, not production-validated. It has not been run in a production deployment, and its Docker deployment and CI workflows have not been exercised. [Production Readiness](#production-readiness) lists what has been verified, what has not, and the known gaps.
 
 ---
 
 ## High-level overview
 
 ```
-Documents → [Loader → Chunker] → ChromaDB (dense)
-                                 BM25 index  (sparse)
-                                      ↓
-Query → Language detection → HybridRetriever (RRF fusion)
-                           → CrossEncoder Reranker
-                                      ↓
-                           → Generator (OpenAI / Anthropic)
-                                      ↓
-                           Answer + Citations + OTel traces
+Documents -> Loader -> Chunker -> ChromaDB (dense vectors, per language)
+                                     |
+                                     +-> BM25 index (built on first hybrid query)
+
+Query -> Detect language -> Vector search            (default)
+                            or Hybrid search         (use_hybrid=true)
+                         -> Cross-encoder reranker   (only if use_reranker=true)
+                         -> Context budget -> LLM -> Answer + citation list
+                         -> Verify and repair        (only if self_heal=true)
 ```
 
 ## Architecture
 
+**Ingestion**
+
 ```mermaid
 flowchart TD
-    UI[Browser UI<br/>Select PDF with + button]
-
-    UI -->|1. Upload PDF| UPLOAD[FastAPI upload endpoint]
-    UPLOAD --> SAFE[Validate file type, size, and path]
-    SAFE --> SAVE[Save under data/uploads]
-    SAVE --> INGEST[Ingest document]
-    INGEST --> LOAD[Extract text<br/>PDF, TXT, MD, or JSON]
+    UI[Browser UI] -->|PDF only| UPLOAD["POST /upload<br/>checks .pdf extension and size"]
+    UPLOAD --> SAVE[Save under data/uploads]
+    SAVE --> INGEST[Ingest]
+    SERVER["POST /ingest, POST /ingest/async,<br/>or scripts/ingest.py"] -->|path inside the data directory| INGEST
+    INGEST --> LOAD["Load PDF, TXT, MD, or JSON<br/>(JSON is stored as raw text)"]
     LOAD --> CHUNK[Split into overlapping chunks]
-    CHUNK --> DOC_LANG[Detect document language]
-    DOC_LANG --> EMBED[Create sentence-transformer embeddings]
-    EMBED --> WRITE[Batch and retry writes]
-    WRITE --> CHROMA[(ChromaDB<br/>dense vectors by language)]
-    CHUNK --> BM25[(BM25<br/>sparse keyword index)]
-    CHROMA --> READY[Knowledge base ready]
-    BM25 --> READY
-
-    READY --> QUESTION[2. User asks a question]
-    QUESTION --> API[FastAPI query endpoint<br/>auth, validation, request ID]
-    API --> QUERY_LANG[Detect query language]
-    QUERY_LANG --> RETRIEVE[Retrieve candidate chunks]
-    CHROMA --> RETRIEVE
-    BM25 --> HYBRID[Optional hybrid fusion<br/>BM25 + vector + RRF]
-    RETRIEVE --> HYBRID
-    HYBRID --> RERANK[Optional cross-encoder reranker]
-    RERANK --> CONTEXT[Apply context budget]
-    CONTEXT --> PROMPT[Build grounded prompt<br/>with numbered sources]
-    PROMPT --> LLM[LLM generation<br/>OpenAI, OpenRouter, or Anthropic]
-    LLM --> CITE[Build answer citations]
-
-    CITE --> HEAL{Self-healing enabled?}
-    HEAL -->|No| RESPONSE[3. Return answer, citations,<br/>token usage, and latency]
-    HEAL -->|Yes| VERIFY[Verify answer quality<br/>and citation support]
-    VERIFY -->|Pass| RESPONSE
-    VERIFY -->|Fail| REPAIR[Diagnose and repair<br/>rewrite, retrieve wider,<br/>expand context, or regenerate]
-    REPAIR --> RETRIEVE
-    VERIFY -->|Max attempts| ABSTAIN[Structured abstention]
-    ABSTAIN --> RESPONSE
-
-    RESPONSE --> UI
-    API -.-> OBS[Prometheus metrics<br/>OTel / Langfuse traces<br/>health, readiness, and stats]
+    CHUNK --> LANG[Detect language per chunk]
+    LANG --> EMBED[Embed and write in batches]
+    EMBED --> CHROMA[("ChromaDB<br/>one collection per language")]
+    CHROMA -.->|"built on first hybrid query,<br/>then appended on ingest"| BM25[("BM25 index<br/>one per language")]
 ```
 
-The self-healing branches run only when enabled globally or per query. Otherwise, generation and citations return directly to the API response.
+**Query**
+
+```mermaid
+flowchart TD
+    Q["POST /query, POST /query/stream,<br/>or scripts/query.py"] --> QLANG["Detect query language<br/>(selects one collection)"]
+    QLANG --> MODE{use_hybrid?}
+    MODE -->|no, default| VEC[Vector search]
+    MODE -->|yes| HYB["Hybrid search: BM25 + vector,<br/>fused with alpha-weighted RRF"]
+    VEC --> RR{use_reranker?}
+    HYB --> RR
+    RR -->|no, default| BUDGET[Apply context budget]
+    RR -->|yes| RERANK["Cross-encoder rerank<br/>(wider candidate pool down to top_k)"]
+    RERANK --> BUDGET
+    BUDGET --> GEN[LLM generation]
+    GEN --> HEAL{self_heal?}
+    HEAL -->|no, default| LIST1["Build citation list<br/>(no validation)"]
+    LIST1 --> RESP[Return answer and citations]
+    HEAL -->|yes| VERIFY["Verify the answer,<br/>including citation validation"]
+    VERIFY -->|pass| LIST2[Build citation list]
+    LIST2 --> RESP
+    VERIFY -->|attempts exhausted| ABSTAIN["Structured abstention<br/>(no citations)"]
+    ABSTAIN --> RESP
+    VERIFY -->|"fail: generation<br/>or citation"| REGEN[Repair prompt, same passages]
+    REGEN --> GEN
+    VERIFY -->|"fail: retrieval, query,<br/>or context"| RETRY["Rewrite query or widen retrieval<br/>(2nd+ retry: multi-query RRF)"]
+    RETRY --> MODE
+```
+
+Hybrid search, reranking, and self-healing are three independent switches, all off by default. Instrumentation is shown separately in [Monitoring & Observability](#monitoring--observability), because it differs by entry point.
+
+### Ways documents get in
+
+| Entry point | Accepted input | Notes |
+| ----------- | -------------- | ----- |
+| Browser UI, `POST /upload` | **PDF only** | Checks the `.pdf` extension (not the file contents) and `RAG_MAX_FILE_SIZE_MB`, then saves under `data/uploads`. The UI then calls `/ingest` on the saved file. |
+| `POST /ingest`, `POST /ingest/async` | PDF, TXT, MD, JSON | Takes a file or directory path that must be inside `RAG_DATA_DIR`. The file must already be on the server. |
+| `scripts/ingest.py` | PDF, TXT, MD, JSON | Local CLI. Routes to a running API server when there is one. |
+
+JSON files are loaded as raw text, not parsed into fields. To index a TXT, MD, or JSON file you must use one of the path-based entry points.
+
+### Retrieval modes
+
+`use_hybrid` and `use_reranker` are independent request fields, so there are four modes. The API and the UI both default to the first.
+
+| `use_hybrid` | `use_reranker` | Candidates | Final passages | Citation `score` |
+| ------------ | -------------- | ---------- | -------------- | ---------------- |
+| `false` | `false` | Vector search, `top_k` | As retrieved | Cosine similarity |
+| `true` | `false` | Hybrid RRF, `top_k` | As retrieved | RRF score (rank-derived, small values) |
+| `false` | `true` | Vector search, `RAG_TOP_K_RETRIEVAL` (20) | Reranked to `top_k` | Cross-encoder score |
+| `true` | `true` | Hybrid RRF, `RAG_TOP_K_RETRIEVAL` (20) | Reranked to `top_k` | Cross-encoder score |
+
+With self-healing on, the first attempt uses the requested mode. Retrieval retries switch to hybrid unless `RAG_HEALING_ESCALATE_HYBRID=false`, and add reranking only if it was requested or `RAG_HEALING_RERANK_ON_RETRY=true`.
+
+### Two different RRF stages
+
+Reciprocal Rank Fusion is used in two places that do different jobs. They are separate code paths with separate settings.
+
+| | Hybrid RRF | Multi-query RRF |
+| | ---------- | --------------- |
+| **Question it answers** | How do I combine keyword and semantic rankings for one query? | How do I combine the results of several versions of a query? |
+| **Runs when** | `use_hybrid=true`, or a self-healing retry that escalated to hybrid | Self-healing only, from the 2nd retrieval retry onward |
+| **Inputs** | The BM25 ranking and the vector ranking of one query | One ranked list per query (original plus every rewrite). Each list is vector-only or already hybrid |
+| **Formula** | `alpha/(k+r_vec+1) + (1-alpha)/(k+r_bm25+1)` | Sum of `1/(60+r+1)` across lists, unweighted |
+| **Tuning** | `RAG_RRF_K` (60), `RAG_HYBRID_ALPHA` (0.6). Healing retries move alpha by +/-0.25 | Fixed at 60; `RAG_RRF_K` does not apply |
+| **Code** | `HybridRetriever.search`, `src/retrieval/hybrid.py` | `fuse_ranked_lists`, `src/healing/adaptive_retrieval.py` |
+
+When both run, hybrid RRF happens per query and multi-query RRF then fuses the results. Any reranking comes last and always scores against the user's original question, not a rewrite.
+
+### Citations: building vs. validating
+
+These are two separate steps, and only the first always happens.
+
+| | Citation list | Citation validation |
+| | ------------- | ------------------- |
+| **What it does** | Turns retrieved passages into the `citations` array in the response | Checks the `[n]` markers the model wrote in the answer text |
+| **Runs when** | Every answer, except an abstention, which returns no citations | Only with self-healing on |
+| **Checks** | None. It lists the retrieved passages whether or not the answer cited them | At least one marker; every `n` within `1..passages shown`; at least `RAG_MIN_CITATION_SUPPORT` of cited sentences share enough words with the passage they cite |
+| **On failure** | Not applicable | `CITATION_FAILURE`, then regeneration with a citation-repair prompt |
+| **Code** | `CitationFormatter.build_citations`, `src/generation/citations.py` | `check_citations`, `src/healing/verifier.py` |
+
+So without self-healing, `[n]` markers are whatever the model wrote and nothing checks them. Two further limits apply:
+
+- `citations` is the list of retrieved passages, not a list of the passages the answer actually relied on.
+- Without self-healing, the list is built before the context budget is applied, so it can include passages the model never saw. With self-healing, it is built from the passages shown to the model, so `[n]` maps to `citations[n-1]`.
+
+Citation support is a word-overlap heuristic, so it can catch a misattributed citation but cannot prove a claim is true. Claim-level checking comes from the separate LLM judge, which also runs only with self-healing.
 
 ### Four Progressive Phases
 
@@ -84,23 +143,23 @@ The self-healing branches run only when enabled globally or per query. Otherwise
 ## Features
 
 - **Self-Healing Answers (opt-in)** — A verifier checks every answer (citation range and support, retrieval sufficiency, refusal detection, then an LLM judge for faithfulness, relevance, and unresolved contradictions). Failures are diagnosed deterministically into retrieval / query / context / generation / citation failures and repaired accordingly — query rewrite with adapted hybrid retrieval, context expansion, or regeneration with a repair prompt — then re-verified. After `RAG_MAX_HEALING_ATTEMPTS` the service returns a structured abstention instead of an unverified answer. Enable with `RAG_SELF_HEALING_ENABLED=true` or `"self_heal": true` per request.
-- **Hybrid Search** — BM25 (built-in inverted index, numpy only) + ChromaDB vector similarity fused with Reciprocal Rank Fusion (RRF). Alpha controls the balance. The BM25 side holds only chunk IDs and term postings (~1.2 KB per chunk) and fetches hit text from the vector store; ingests append to an on-disk journal, and restarts load the index in well under a second. It persists with 0o600 permissions and a size safety guard.
-- **Query Embedding Cache** — An in-process LRU cache (`RAG_EMBEDDING_QUERY_CACHE_SIZE`, default 256) avoids re-running the embedding model for repeated/paraphrased queries — common in eval runs and demos. Cache hit/miss counts are exposed via `/stats` and `/metrics`.
-- **Cross-Encoder Reranking** — `BAAI/bge-reranker-large` (configurable) reorders retrieved chunks for maximum relevance before generation.
-- **Multilingual Routing** — `langdetect` identifies the query language; documents are sharded into per-language ChromaDB collections (en/de/es) with language-appropriate prompts via gettext.
+- **Hybrid Search (opt-in)** — BM25 (built-in inverted index, numpy only) + ChromaDB vector similarity fused with alpha-weighted Reciprocal Rank Fusion. Enable with `"use_hybrid": true`. The BM25 side holds only chunk IDs and term postings (~1.2 KB per chunk) and fetches hit text from the vector store; ingests append to an on-disk journal, and restarts load the index in well under a second. It persists with 0o600 permissions and a size safety guard.
+- **Query Embedding Cache** — An in-process LRU cache (`RAG_EMBEDDING_QUERY_CACHE_SIZE`, default 256) avoids re-running the embedding model for repeated queries. It matches the exact query text, so a paraphrase is a miss. Hit/miss counts are in `/stats` (English collection only), not `/metrics`.
+- **Cross-Encoder Reranking (opt-in)** — Reorders retrieved chunks before generation, on either vector or hybrid results. Enable with `"use_reranker": true`. The default model is `BAAI/bge-reranker-large`; `.env.example` sets the much smaller `cross-encoder/ms-marco-MiniLM-L-6-v2` instead, so check which one your `.env` selects.
+- **Multilingual Routing** — `langdetect` runs per chunk at ingest and per query, routing to per-language ChromaDB collections (en/de/es; anything else falls back to `en`), with prompts translated via gettext. A query searches only its detected language's collection, so a German question will not find English documents.
 - **SSE Token Streaming** — `/query/stream` endpoint delivers tokens over Server-Sent Events as they are generated; compatible with any EventSource client.
-- **Async Ingestion** — `POST /ingest/async` enqueues ingestion as a background job and returns a `job_id` immediately (202), avoiding client/proxy timeouts on large corpora; poll `GET /ingest/jobs/{job_id}` for status. The server stays fully responsive to other requests while a job runs.
-- **Dual LLM Backend** — Switch between OpenAI and Anthropic at runtime via `RAG_LLM_PROVIDER`. Async streaming implemented for both providers.
-- **Optional API Key Auth** — Set `RAG_API_KEY` to require `Authorization: Bearer <key>` on all requests. Omit the variable to run without auth (development default).
-- **OpenTelemetry Metrics** — Latency histograms, query counters, cost tracking, and error rates exported via OTLP. Falls back gracefully when the OTel backend is absent.
-- **Langfuse Tracing** — End-to-end span capture for retrieve → rerank → generate stages with generation cost attribution. Circuit breaker prevents telemetry failures from impacting query latency.
+- **Async Ingestion** — `POST /ingest/async` enqueues ingestion as a background job and returns a `job_id` immediately (202), avoiding client/proxy timeouts on large corpora; poll `GET /ingest/jobs/{job_id}` for status. Job status is held in memory, so it is lost on restart and is not shared between replicas.
+- **LLM Backends** — OpenAI or Anthropic via `RAG_LLM_PROVIDER`, chosen at startup, with streaming for both. Provider-qualified model names or an `sk-or-` key route the OpenAI client to OpenRouter (`RAG_OPENROUTER_MODE` overrides this).
+- **Optional API Key Auth** — Set `RAG_API_KEY` to require `Authorization: Bearer <key>` on every route except `/healthz` and the UI page. Auth is off when the variable is unset, which is the default.
+- **Prometheus Metrics and Dashboard** — `/metrics` exposes per-route request counts and latency plus self-healing counters. The UI's Observability button shows them as a dashboard.
+- **OpenTelemetry and Langfuse Instrumentation (library wrapper)** — `MonitoredRAGPipeline` traces ingest, retrieve, rerank, generate, and each healing step, with token and cost attribution and a circuit breaker. The HTTP service does not use this wrapper yet; see [Monitoring & Observability](#monitoring--observability).
 - **Prompt Registry** — SHA-256 hash-based change detection for prompt versioning across deployments.
 - **LLM-as-Judge Evaluation** — All four RAGAS-style quality dimensions via `gpt-4o-mini` against a golden JSONL dataset, with CI quality gate (`--fail-on-threshold`): faithfulness, answer relevance, context precision (Average Precision @ k — are retrieved chunks relevant, ranked well?), and context recall (are reference-answer statements attributable to the retrieved context?).
-- **X-Request-ID Correlation** — Middleware echoes or generates a `X-Request-ID` header on every response for distributed trace correlation.
-- **Context Budget Management** — Configurable `max_context_chars` trims retrieved chunks to fit within the LLM context window without truncating mid-sentence.
+- **X-Request-ID** — Middleware echoes or generates an `X-Request-ID` header on every response. It is not yet attached to logs or traces.
+- **Context Budget** — `RAG_MAX_CONTEXT_CHARS` (default 12000) caps the context sent to the LLM as a cost guardrail. Passages past the budget are dropped, and the last one that fits is cut at the character limit, which can be mid-sentence.
 - **Security Hardening** — Path-traversal guards on `/ingest`, BM25 index stored as plain integer arrays loaded with `allow_pickle=False` (no pickle), 0o600 file permissions on data files, `re.escape()` on pricing pattern matching to prevent ReDoS.
-- **Docker Multi-Stage Build** — `deps → model-cache → runtime` stages; non-root user, no model download at container start.
-- **239 Tests, 3 CI Workflows** — Unit + integration tests with coverage (LLM calls mocked; no API keys needed), automatic quality gate evaluation, and GHCR Docker publish on release.
+- **Docker Multi-Stage Build** — `deps → model-cache → runtime` stages; non-root user, with both reranker models cached in the image. Not yet built or run as part of validation; see [known gaps](#known-gaps-to-close-before-production).
+- **Tests and CI Definitions** — 251 unit, integration, and stress tests (LLM calls mocked; no API keys needed). Three GitHub Actions workflows are defined for CI, the evaluation gate, and GHCR publish, but their branch triggers do not match this repository yet, so they have not run.
 
 ---
 
@@ -169,11 +228,13 @@ uvicorn src.api:app --reload --host 0.0.0.0 --port 8000
 
 | Method | Endpoint                | Description                                                                                            |
 | ------ | ----------------------- | ------------------------------------------------------------------------------------------------------ |
-| `GET`  | `/healthz`              | Liveness probe — returns `{"status": "ok"}`                                                            |
-| `GET`  | `/readyz`               | Readiness probe — warms embedding model                                                                |
-| `GET`  | `/stats`                | Pipeline statistics (chunks, model, config)                                                            |
+| `GET`  | `/`                     | Browser UI, including the Observability dashboard (no auth)                                            |
+| `GET`  | `/healthz`              | Liveness probe — returns `{"status": "ok"}` (no auth)                                                  |
+| `GET`  | `/readyz`               | Readiness probe — builds the per-language stores, BM25 indexes, and reranker object once. Later calls reuse them, so it does not detect a Chroma outage |
+| `GET`  | `/stats`                | Pipeline statistics (model, config, and chunk and cache counts for the English collection only)        |
 | `GET`  | `/metrics`              | Prometheus scrape endpoint — request count + latency histograms by route, plus `rag_healing_*` metrics |
-| `POST` | `/ingest`               | Ingest documents from a server-accessible path (blocks until done)                                     |
+| `POST` | `/upload`               | Save a browser-uploaded **PDF** under `data/uploads` (does not index it; call `/ingest` next)          |
+| `POST` | `/ingest`               | Ingest PDF, TXT, MD, or JSON from a path inside the data directory (blocks until done)                 |
 | `POST` | `/ingest/async`         | Enqueue ingestion as a background job; returns `job_id` immediately (202)                              |
 | `GET`  | `/ingest/jobs/{job_id}` | Poll status of an async ingestion job                                                                  |
 | `POST` | `/query`                | Synchronous Q&amp;A — returns answer + citations                                                       |
@@ -244,6 +305,9 @@ streamed, with one extra `data: {"healing": {...}}` event before `citations`.
 | `X-Request-ID`                | Optional correlation ID; echoed in response (generated if absent) |
 
 
+`POST /query` responses also carry `X-RAG-Prompt-Tokens`, `X-RAG-Completion-Tokens`, `X-RAG-Total-Tokens`, and `X-RAG-LLM-Latency-Sec`, summed across every LLM call in the request. These are headers only; they are not in the JSON body and are not sent by `/query/stream`.
+
+
 ---
 
 ## Configuration
@@ -257,6 +321,8 @@ All settings use the `RAG_` prefix and can be set via `.env` or environment vari
 | -------------------------------- | -------------------------------------- | ----------------------------------------------------------- |
 | `RAG_LLM_PROVIDER`               | `openai`                               | LLM backend: `openai` or `anthropic`                        |
 | `RAG_LLM_MODEL`                  | `gpt-4o-mini`                          | Model name for the selected provider                        |
+| `RAG_OPENROUTER_MODE`            | `auto`                                 | `true`/`false` forces OpenRouter routing on or off for the OpenAI client |
+| `RAG_CHROMA_HOST`, `RAG_CHROMA_PORT` | *(unset)*                          | Use a Chroma server instead of the embedded store           |
 | `OPENAI_API_KEY`                 | —                                      | OpenAI API key                                              |
 | `ANTHROPIC_API_KEY`              | —                                      | Anthropic API key                                           |
 | `RAG_DATA_DIR`                   | `data`                                 | Root directory for data files                               |
@@ -265,13 +331,16 @@ All settings use the `RAG_` prefix and can be set via `.env` or environment vari
 | `RAG_CHUNK_OVERLAP`              | `150`                                  | Overlap between adjacent chunks                             |
 | `RAG_TOP_K_RETRIEVAL`            | `20`                                   | Candidates fetched before reranking                         |
 | `RAG_TOP_K_FINAL`                | `5`                                    | Final context chunks passed to the LLM                      |
-| `RAG_HYBRID_ALPHA`               | `0.6`                                  | RRF weight: 1.0 = pure vector, 0.0 = pure BM25              |
+| `RAG_MAX_CONTEXT_CHARS`          | `12000`                                | Total context characters sent to the LLM (`0` disables)     |
+| `RAG_MAX_FILE_SIZE_MB`           | `50`                                   | Per-file limit for upload and ingest                        |
+| `RAG_HYBRID_ALPHA`               | `0.6`                                  | Hybrid RRF weight: 1.0 = pure vector, 0.0 = pure BM25       |
+| `RAG_RRF_K`                      | `60`                                   | Hybrid RRF constant (multi-query RRF is fixed at 60)        |
 | `RAG_HNSW_EF_SEARCH`             | `200`                                  | HNSW search breadth: higher = better recall, same latency up to ~200 |
 | `RAG_HNSW_MAX_NEIGHBORS`         | `16`                                   | HNSW graph degree M (new collections only; 32 adds ~20% build time) |
 | `RAG_HNSW_EF_CONSTRUCTION`       | `100`                                  | HNSW build breadth (new collections only)                   |
 | `RAG_BM25_MAX_INDEX_MB`          | `500`                                  | Max BM25 index file persisted/loaded (~1 KB/chunk; use ~2000 for 1M chunks) |
 | `RAG_EMBEDDING_QUERY_CACHE_SIZE` | `256`                                  | LRU cache size for repeated query embeddings (`0` disables) |
-| `RAG_RERANKER_MODEL`             | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder model                                         |
+| `RAG_RERANKER_MODEL`             | `BAAI/bge-reranker-large`              | Cross-encoder model. `.env.example` overrides this with `cross-encoder/ms-marco-MiniLM-L-6-v2` |
 | `RAG_FAITHFULNESS_THRESHOLD`     | `0.7`                                  | Minimum faithfulness score for CI gate                      |
 | `RAG_CORS_ORIGINS`               | `*`                                    | Comma-separated allowed CORS origins                        |
 | `RAG_API_KEY`                    | *(unset)*                              | Bearer token for API auth (disabled when unset)             |
@@ -294,14 +363,14 @@ All settings use the `RAG_` prefix and can be set via `.env` or environment vari
 | `RAG_MIN_CITATION_SUPPORT`   | `0.5`                 | Fraction of cited sentences that must overlap the cited passage    |
 
 
-More tuning knobs (`RAG_HEALING_*`) are documented in [docs/SELF\_HEALING.md](docs/SELF_HEALING.md#configuration).
+More tuning knobs (`RAG_HEALING_*`) are documented in the [Self-Healing section](#self-healing) below.
 
 ### Monitoring Settings (`MONITOR_` prefix)
 
 
 | Variable                                   | Default                 | Description                                                                     |
 | ------------------------------------------ | ----------------------- | ------------------------------------------------------------------------------- |
-| `MONITOR_ENABLED`                          | `false`                 | Enable the monitoring subsystem; when `false` the rest of this table is ignored |
+| `MONITOR_ENABLED`                          | `false`                 | Enables `MonitoredRAGPipeline` in `scripts/evaluate.py`. It has **no effect** on the HTTP service |
 | `MONITOR_LANGFUSE_SECRET_KEY`              | —                       | Langfuse secret key (`sk-lf-…`)                                                 |
 | `MONITOR_LANGFUSE_PUBLIC_KEY`              | —                       | Langfuse public key (`pk-lf-…`)                                                 |
 | `MONITOR_LANGFUSE_HOST`                    | `http://localhost:3000` | Langfuse server URL                                                             |
@@ -315,36 +384,76 @@ More tuning knobs (`RAG_HEALING_*`) are documented in [docs/SELF\_HEALING.md](do
 
 ## Monitoring &amp; Observability
 
-### OpenTelemetry Metrics
+There are two layers, and which one you get depends on how you run the pipeline.
 
-When `MONITOR_ENABLED=true` and an OTLP endpoint is reachable, the pipeline exports:
+```mermaid
+flowchart LR
+    subgraph HTTP["HTTP service: uvicorn src.api:app (always on)"]
+        MW[Prometheus middleware<br/>every route] --> METRICS["/metrics"]
+        ENGINE[HealingEngine] --> METRICS
+        PROBES["/healthz, /readyz, /stats"]
+        HEADERS["X-Request-ID,<br/>X-RAG-* usage headers"]
+        METRICS --> DASH[UI dashboard]
+        PROBES --> DASH
+    end
+    subgraph WRAP["Wrapper: MonitoredRAGPipeline (library, or evaluate.py with MONITOR_ENABLED=true)"]
+        STAGES[ingest, retrieve, rerank,<br/>generate, query_stream,<br/>each healing step] --> EXT[Extension hooks<br/>circuit breaker]
+        EXT --> LF[Langfuse traces,<br/>tokens and cost]
+        EXT --> OTLP[OTLP metrics]
+        STAGES --> REG[Prompt registry]
+    end
+```
 
-- **`rag.query.latency`** — histogram of end-to-end query latency per pipeline step
-- **`rag.query.count`** — counter of total queries processed
-- **`rag.query.errors`** — counter of errors by step and type
-- **`rag.query.cost`** — running cost in USD per query
+**The HTTP service does not use the wrapper.** `src/api.py` builds a plain `RAGPipeline`, so setting `MONITOR_ENABLED=true` on the server produces no Langfuse traces or OTLP metrics. The wrapper also has no async query method, while `/query` calls `query_async`, so wiring it in needs code changes, not just configuration.
+
+### What each pipeline stage emits
+
+| Stage | HTTP service | `MonitoredRAGPipeline` |
+| ----- | ------------ | ---------------------- |
+| Upload, ingest | Request count and latency per route | `ingest` span |
+| Retrieve (vector or hybrid) | Only inside total `/query` latency | `retrieve` span and latency histogram |
+| Rerank | Only inside total `/query` latency | `rerank` span with pre- and post-scores |
+| Generate | Tokens and LLM latency as `/query` response headers | `generate` span with model, tokens, and cost |
+| Verify and repair | `rag_healing_*` metrics on `/metrics` | The same metrics exported over OTLP, plus one span per step |
+| Embedding cache | Hit and miss counts in `/stats` (English collection only) | Not recorded |
+| Errors | Per-route counts by status code | `rag_{step}_errors_total`, span errors |
+
+`scripts/query.py` and `scripts/ingest.py` use the plain pipeline, so they emit none of the wrapper's signals. Prometheus counters are per process and reset on restart, so a multi-replica deployment needs Prometheus to scrape and aggregate each replica. There is no logging correlation yet: `X-Request-ID` is returned to the caller but is not attached to log lines or traces.
+
+### Prometheus (HTTP service)
+
+`GET /metrics` exposes `rag_http_requests_total{path,method,status_code}`, `rag_http_request_duration_seconds{path,method}`, and the `rag_healing_*` metrics listed under [Self-Healing Observability](#self-healing-observability). The UI's **Observability** button reads these along with `/healthz` and `/stats`, and excludes health checks and its own polling from the request counts.
+
+### OpenTelemetry Metrics (wrapper)
+
+With a `MetricsCollector` attached and an OTLP endpoint reachable, the wrapper exports:
+
+- **`rag_{retrieve,rerank,generate,query_total}_latency_seconds`** — latency histograms per step
+- **`rag_{retrieve,rerank,generate,query_total}_errors_total`** — error counters per step
+- **`rag_queries_total`** — queries processed
+- **`rag_context_chunks_per_query`**, **`rag_cost_per_query_dollars`**, **`rag_tokens_*`** — context, cost, and token histograms
 
 A JSON summary (P50/P95 latency, avg cost, error count) is exported via `MetricsCollector.export_summary()` and written with 0o600 permissions.
 
-### Langfuse Tracing
+### Langfuse Tracing (wrapper)
 
-With Langfuse credentials set, each query creates a trace with spans for:
+With Langfuse credentials set, each query through the wrapper creates a trace with spans for:
 
 - `retrieve` — vector/hybrid search timing
 - `rerank` — cross-encoder reranking timing
 - `generate` — LLM generation with model, token counts, and cost
 
-A circuit breaker (`MONITOR_CIRCUIT_BREAKER_THRESHOLD`) isolates Langfuse failures so a tracing outage never blocks query responses.
+A circuit breaker (`MONITOR_CIRCUIT_BREAKER_THRESHOLD`) isolates Langfuse failures so a tracing outage does not block query responses.
 
 ### Self-Healing Observability
 
-Healed queries (`MonitoredRAGPipeline.query_with_healing`, or `.query(..., self_heal=True)`)
+Healed queries through the wrapper (`MonitoredRAGPipeline.query_with_healing`, or `.query(..., self_heal=True)`)
 get one span per healing step under the query trace — `retrieve_attempt_1`,
 `rerank_attempt_1`, `generate_attempt_1`, `verify_attempt_1`, `query_rewrite`,
 `retrieve_attempt_2`, … — with the verifier's decision (`passed`, `failure_type`,
 `reason`, scores) on each `verify_attempt_N` span.
 
-Healing metrics are exported to Prometheus (`/metrics`) and OTel:
+Healing metrics are recorded wherever healing runs, so they appear on `/metrics` in the HTTP service. They are exported to OTel only when a meter provider is installed, which the wrapper's `MetricsCollector` does:
 `rag.healing.attempts`, `rag.healing.success`, `rag.healing.failures{failure_type}`,
 `rag.healing.abstentions`, `rag.healing.query_rewrites`, `rag.healing.retrieval_retries`,
 `rag.healing.regenerations`, `rag.healing.latency` (Prometheus: `rag_healing_*`).
@@ -378,6 +487,8 @@ changed     = registry.detect_change("system_v1", new_prompt_text)
 
 ## Docker
 
+> These commands have not been validated end to end, and `docker compose up` has known blockers. See [known gaps](#known-gaps-to-close-before-production).
+
 ### Build
 
 ```bash
@@ -407,13 +518,89 @@ This project builds retrieval, fusion, reranking, and generation directly agains
 
 ## Scaling to Production
 
-Notes on what changes as load grows, for anyone evaluating this as a production starting point:
+What changes as load grows, based on what has actually been measured. All numbers are from one Windows 11 laptop (16.8 GB RAM), and retrieval timings use stub embeddings. Treat them as relative guidance, not capacity figures.
 
-- **Horizontal scaling:** The FastAPI service is stateless aside from the lazily-constructed `RAGPipeline` singleton (`src/api.py`); running multiple replicas behind a load balancer works as-is. The one shared-state caveat is the in-process BM25 index cache (`HybridRetriever`) — each replica rebuilds its own copy from the persisted JSON index on first use.
-- **ChromaDB clustering:** The current setup uses a single ChromaDB instance (embedded or standalone via `docker-compose.yml`). At higher scale, Chroma's distributed mode or a managed vector DB (e.g. sharded by language collection, which this project already partitions by) is the natural next step — the per-language collection design in `src/pipeline.py` maps cleanly onto shard boundaries.
-- **Caching:** Repeated/paraphrased queries currently re-embed and re-retrieve from scratch every time. An embedding-result cache (see the improvement roadmap in `ANALYSIS_REPORT.md`) is the highest-leverage addition before adding more compute.
-- **Async ingestion:** Large ingestion jobs currently block the request for their full duration (see `ANALYSIS_REPORT.md` roadmap item D — job-ID + polling pattern) — needed before ingesting corpora large enough to risk proxy timeouts.
-- **Observability is already there:** OTel metrics + Langfuse tracing + circuit breakers mean a horizontally-scaled deployment is debuggable from day one — this is usually the last thing added to a scaling project, not the first, and it's already built in here.
+- **Horizontal scaling:** The drill ran two API replicas with separate disks on one Chroma server. Reads worked, and a document ingested through one replica was found by the other. Three caveats: a `reset=true` on one replica made the other return 500 on its next query; async job status is per process; and each replica detects BM25 staleness only by chunk count, so a same-count replacement ingested elsewhere goes unnoticed.
+- **Hybrid search at scale:** At 50k chunks, BM25 queries took 2-3 ms and a cold index load 0.2 s. A full rebuild took about 5 s. Memory measured at 100k chunks was about 1.2 KB per chunk, which extrapolates to about 1.2 GB at 1M chunks and needs `RAG_BM25_MAX_INDEX_MB` near 2000. The 1M figures have not been run.
+- **Vector search:** `RAG_HNSW_EF_SEARCH` matters most. On 50k synthetic vectors, recall@10 was 0.74 at 10, 0.996 at 100, and 1.000 at 200, with the same latency of about 1.4 ms. The default is 200. A single Chroma instance has no sharding or replicas. The per-language collections are a natural shard boundary if you move to a distributed vector database.
+- **Where the time goes:** In production the LLM call and reranker should dominate, not the vector store. This has not been measured with a real provider or model, so load-test those before sizing anything.
+
+---
+
+## Production Readiness
+
+**Summary: production-oriented, not production-validated.** There is real evidence for correctness and for failure behaviour on one machine. There is no evidence yet from a production deployment, and CI and Docker have never been exercised.
+
+Last assessed 2026-11-03 on commit `426fa53` plus the README changes.
+
+### Evidence
+
+| Area | Evidence | Status |
+| ---- | -------- | ------ |
+| Tests | `python -m pytest tests/`: 251 tests with mocked LLMs, 81% line coverage | Passing locally, with an intermittent failure: one of two full runs on this date had 1 failed test (not identified), and an earlier run failed `test_multilingual_ingestion_routing` with a Chroma HNSW error |
+| Vector store stress | `tests/test_vector_store_stress.py`: ingest, recall, concurrent reads and writes, deletes, persistence | Passes at 50k chunks embedded and at 20k against a Chroma server, with stub embeddings |
+| Failure drill | `python scripts/operational_drill.py`: real API and Chroma processes, hard-killed and restarted | 18 of 22 checks met, one run, results below |
+| Retrieval and answer quality | `scripts/evaluate.py` and `--healing-report` | **No published results.** They need a provider API key, and the test suite does not measure answer quality |
+| CI | `.github/workflows/` | **Never run.** All three workflows trigger on `main`, but the default branch is `master`. The only Actions runs on the repository are Dependabot's |
+| Docker image | `Dockerfile` | **Not built during this assessment** |
+| `docker compose` | `docker-compose.yml` | **Not run**, and two blockers were found by inspection (see below) |
+| Production deployment | None | **None.** No real traffic, SLOs, alerting, on-call, or incident history |
+
+### Failure drill results
+
+The drill uses real API and Chroma server processes on loopback, a local fake LLM with 50 ms latency, and stub embeddings. It therefore measures service behaviour and overhead, not real LLM, embedding, or reranker cost. Timings are from one run, and it does not involve Docker.
+
+| Scenario | What we want | Observed | Met? |
+| -------- | ------------ | -------- | ---- |
+| Startup | API healthy; ingest and query work | Healthy in 8.4 s; 16 chunks ingested; vector and hybrid queries returned 200 | Yes |
+| Load: 300 `/query` at concurrency 20, vector | All 200 | All 200; 99 req/s, p50 196 ms, p95 241 ms | Yes |
+| Load: 300 `/query` at concurrency 20, hybrid | All 200 | All 200; 40 req/s, p50 463 ms, p95 750 ms | Yes |
+| LLM provider returns 429 | 429 passed to the caller | 429 after 12.3 s of retries | Yes |
+| LLM provider returns 500 | Clean 5xx | 502 after 12.3 s of retries | Yes |
+| LLM provider hangs | An error within 30 s | **No response within a 30 s client timeout** | **No** |
+| LLM provider recovers | 200 with no restart | 200 | Yes |
+| Chroma killed: `/healthz` | 200 (process is alive) | 200 | Yes |
+| Chroma killed: `/readyz` | 503 (stop sending traffic) | **200** | **No** |
+| Chroma killed: `/query` | Clean 5xx in a few seconds | 500 after 11.6 s | Yes |
+| Chroma restarted | 200 with no API restart | 200 after 2.2 s | Yes |
+| API killed and restarted | Chunks intact; hybrid works | 16 chunks before and after; healthy in 7.3 s; hybrid returned 200 | Yes |
+| Async job status after restart | Job still known | **404**; job status is in memory | **No** |
+| Two replicas: cross-replica ingest | Replica B finds a document ingested through A | Found | Yes |
+| Two replicas: A runs `reset=true` | B keeps working with no restart | **B returned 500** on its next query | **No** |
+
+### Known gaps to close before production
+
+**Deployment blockers**
+
+1. **CI never runs.** The workflows trigger on `main`, and the branch is `master`. Once triggered, the CI job would also fail as the code stands: `ruff format --check` flags 3 files and `mypy src/` reports 59 errors.
+2. **`docker compose up` very likely will not start the API.** The Chroma healthcheck calls `/api/v1/heartbeat`, which returned 410 on chromadb 1.5.9 when tested directly (`/api/v2/heartbeat` returned 200), and the `api` service waits for that check to pass. Whether the image contains `curl` has not been checked, and `chromadb/chroma:latest` is unpinned.
+3. **The Docker image has no UI.** The `Dockerfile` does not copy `index.html`, which `GET /` serves, so the UI and dashboard are missing from a container.
+
+**Reliability**
+
+4. **`/readyz` cannot detect a Chroma outage.** It reuses cached objects, so it returned 200 with Chroma down, and an orchestrator would keep routing traffic to the instance.
+5. **No overall deadline on LLM calls.** A hung provider left a request open past a 30 s client timeout. Each attempt has a 60 s client timeout, and SDK-level and application-level retries apply on top.
+6. **A store reset breaks other replicas.** The replica that did not run the reset returned 500 on its next query. How long that lasts was not measured.
+7. **Async job status is lost on restart** and is not shared between replicas.
+8. **Chroma being unreachable can return 400.** If Chroma is down when the API first connects, `/ingest` and `/query` returned 400, which blames the caller for a server-side outage. An outage after startup returned 500, as it should.
+
+**Observability**
+
+9. **OpenTelemetry and Langfuse are not wired into the HTTP service**, and `X-Request-ID` does not reach logs or traces.
+10. **`/stats` counts only the English collection**, so the dashboard's chunk and cache numbers undercount multilingual corpora.
+
+**Defaults to change for a real deployment**
+
+11. Auth is off unless `RAG_API_KEY` is set, and CORS defaults to `*`.
+
+### Not tested at all
+
+- Real LLM, embedding, and reranker latency or cost under load
+- Soak tests, memory growth over time, and traffic beyond the short burst above
+- Corpora beyond 100k chunks (the 1M figures are extrapolations)
+- Disk-full, network partition, and multi-host deployment
+- Backup and restore, index format upgrades, and rollback
+- Security testing of a deployed instance; the audit notes further down this page are code reviews
 
 ---
 
@@ -451,14 +638,14 @@ python scripts/evaluate.py --healing-report --hybrid
 python scripts/evaluate.py --self-heal --hybrid --reranker   # standard set with healing on
 ```
 
-The `evaluate.yml` GitHub Actions workflow runs this gate on every push to `main` and posts results as a PR comment. The CI quality gate itself still keys off faithfulness only (unchanged threshold semantics); context precision/recall are reported alongside for visibility.
+The `evaluate.yml` GitHub Actions workflow is written to run this gate on pushes to `main`, a branch this repository does not have, so **it has not run** and no results are published here. The gate keys off faithfulness only; context precision/recall are reported alongside for visibility.
 
 ---
 
 ## Testing
 
 ```bash
-# Full suite (239 tests):
+# Full suite (251 tests):
 python -m pytest tests/ -v
 
 # With coverage report:
@@ -474,16 +661,19 @@ python -m pytest tests/test_monitoring.py -v
 | Module                        | Coverage focus                                                                                    |
 | ----------------------------- | ------------------------------------------------------------------------------------------------- |
 | `test_pipeline.py`            | End-to-end query/ingest flows                                                                     |
-| `test_retrieval.py`           | Vector store, hybrid retriever, RRF scoring                                                       |
-| `test_generation.py`          | Generator, streaming, citation formatting                                                         |
+| `test_retrieval.py`           | Vector store, hybrid retriever, BM25 scoring and persistence, RRF, embedding cache, reranker      |
+| `test_vector_store_stress.py` | Scaled ingest, recall, concurrency, deletes, persistence (`RAG_STRESS_*` to scale or use a server) |
+| `test_ingestion.py`           | Document loading and chunking strategies                                                          |
 | `test_evaluation.py`          | LLM-as-Judge scorer, golden dataset, CI summary                                                   |
 | `test_monitoring.py`          | Tracer spans, MetricsCollector, circuit breaker, guardrails                                       |
-| `test_api.py`                 | FastAPI endpoints, auth, SSE streaming                                                            |
-| `test_chunker.py`             | Recursive/fixed/sentence chunking strategies                                                      |
+| `test_api.py`, `test_api_extensions.py` | FastAPI endpoints, auth, SSE streaming, upstream error mapping                          |
+| `test_i18n.py`                | Language routing and localized responses                                                          |
+| `test_versioning.py`          | Version bump tooling                                                                              |
 | `test_healing_verifier.py`    | Verifier deterministic checks, LLM-judge parsing/degradation, failure classifier                  |
 | `test_healing_routing.py`     | State-machine routing, adaptive retrieval plans, query rewriting, repair prompts, healing metrics |
 | `test_healing_engine.py`      | Retrieval/generation/citation repair, recovery, max retries, abstention, trace spans              |
 | `test_healing_integration.py` | Healing through `RAGPipeline`, `/query`, `/query/stream` (SSE), `/metrics`, and monitoring        |
+| `test_healing_evaluation.py`  | Baseline vs. healed evaluation report                                                             |
 
 
 ---
@@ -493,14 +683,13 @@ python -m pytest tests/test_monitoring.py -v
 ```
 production-grade-rag/
 ├── src/
-│   ├── api/
-│   │   └── app.py              # FastAPI app, auth, SSE streaming, middleware
+│   ├── api.py                  # FastAPI app, auth, SSE streaming, middleware, /metrics
 │   ├── ingestion/
-│   │   ├── loader.py           # PDF, TXT, Markdown document loading
+│   │   ├── loader.py           # PDF, TXT, Markdown, JSON (raw text) loading
 │   │   └── chunker.py          # Recursive / fixed / sentence chunking
 │   ├── retrieval/
 │   │   ├── vector_store.py     # ChromaDB wrapper with embedding
-│   │   ├── hybrid.py           # BM25 + RRF hybrid retriever
+│   │   ├── hybrid.py           # BM25 index + hybrid RRF retriever
 │   │   └── reranker.py         # Cross-encoder reranker
 │   ├── generation/
 │   │   ├── generator.py        # OpenAI / Anthropic generation + streaming
@@ -508,7 +697,7 @@ production-grade-rag/
 │   ├── evaluation/
 │   │   ├── runner.py           # LLM-as-Judge evaluation runner
 │   │   ├── healing_eval.py     # Baseline vs. self-healing evaluation
-│   │   ├── scorer.py           # Faithfulness + relevance scorers
+│   │   ├── metrics.py          # Faithfulness, relevance, context precision/recall scorers
 │   │   └── dataset.py          # Golden JSONL dataset management
 │   ├── healing/
 │   │   ├── verifier.py         # Deterministic checks + LLM judge → VerificationResult
@@ -531,11 +720,14 @@ production-grade-rag/
 │   ├── config.py               # RAGSettings (RAG_* env vars, pydantic-settings)
 │   └── utils/
 │       └── i18n.py             # gettext internationalization helpers
-├── tests/                      # 239 pytest tests
+├── index.html                  # Browser UI and Observability dashboard
+├── tests/                      # 251 pytest tests
 ├── scripts/
 │   ├── ingest.py               # CLI document ingestion
 │   ├── query.py                # CLI query (auto-routes to API if running)
-│   └── evaluate.py             # CLI evaluation runner
+│   ├── evaluate.py             # CLI evaluation runner
+│   ├── bench_vector_store.py   # HNSW and BM25 benchmarks
+│   └── operational_drill.py    # Failure drill (kills and restarts real processes)
 ├── data/
 │   └── sample_docs/            # Sample documents for quick-start
 ├── .github/workflows/
@@ -553,7 +745,8 @@ production-grade-rag/
 
 ## Security
 
-- **API authentication** — `RAG_API_KEY` enables Bearer token auth on all endpoints, checked with a constant-time comparison (`secrets.compare_digest`) to prevent timing-based key recovery.
+- **API authentication** — `RAG_API_KEY` enables Bearer token auth on every endpoint except `/healthz` and the UI page, checked with a constant-time comparison (`secrets.compare_digest`) to prevent timing-based key recovery.
+- **Upload filtering** — `/upload` strips directory components, requires a `.pdf` extension, and enforces the size limit. It does not inspect file contents.
 - **Path traversal protection** — `/ingest` resolves symlinks and validates the source path is contained within the configured data directory before file access.
 - **No pickle** — the BM25 index persists as plain integer arrays (`np.load(..., allow_pickle=False)`); no `pickle.load()` anywhere in the codebase.
 - **File permissions** — Sensitive data files (BM25 index, metrics export) are written with `os.open(..., 0o600)`.
@@ -562,8 +755,8 @@ production-grade-rag/
 - **Secret hygiene** — No partial key logging; keys validated structurally, not compared in logs.
 - **No internal error leakage** — Readiness/health failures are logged server-side; clients receive a generic status message.
 - **CORS** — `RAG_CORS_ORIGINS` restricts cross-origin access; defaults to `*` for local development only.
-- **Deployment-topology hardening** — `docker-compose.yml` does not publish ChromaDB's own REST API to the host; it's reachable only over the internal Docker network by the API service, which prevents bypassing this project's auth layer by hitting Chroma directly.
-- **Dependency scanning** — Dependencies are periodically checked with `pip-audit`; see `ANALYSIS_REPORT.md` for the full audit trail and CVE findings.
+- **Deployment-topology hardening** — `docker-compose.yml` is written so ChromaDB's REST API is not published to the host, reachable only over the internal Docker network. This is a property of the file; the compose stack itself has not been run.
+- **Dependency updates** — Dependabot is configured. `pip-audit` was run manually during the audits recorded in the Analysis Report below, and it is not part of CI.
 
 To report a security vulnerability, please open a private advisory via GitHub Security.
 
@@ -579,11 +772,11 @@ This project showcases production AI/ML engineering across the full stack:
 | **LLM integration**       | Dual-provider (OpenAI + Anthropic), async streaming, token tracking    |
 | **Information retrieval** | BM25, dense vector search, RRF fusion, cross-encoder reranking         |
 | **API design**            | FastAPI, SSE streaming, auth middleware, readiness probes              |
-| **Observability**         | OpenTelemetry metrics, Langfuse distributed tracing, circuit breaker   |
+| **Observability**         | Prometheus metrics and dashboard; OTel and Langfuse wrapper with a circuit breaker |
 | **LLM evaluation**        | LLM-as-Judge, faithfulness + relevance metrics, golden dataset CI gate |
 | **Security engineering**  | Auth, path traversal defense, safe file I/O, no pickle                 |
-| **Testing**               | 239 tests, async patterns, mocking strategy, coverage reporting        |
-| **DevOps / MLOps**        | Docker multi-stage build, GitHub Actions CI/CD, GHCR publish           |
+| **Testing**               | 251 tests, stress test, failure drill, mocking strategy, coverage      |
+| **DevOps / MLOps**        | Docker multi-stage build and GitHub Actions workflows (defined, not yet exercised) |
 | **Multilingual NLP**      | Language detection, per-language vector collections, i18n prompts      |
 
 
@@ -591,11 +784,13 @@ This project showcases production AI/ML engineering across the full stack:
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) for details.
+MIT License — see [LICENSE](../LICENSE) for details.
 
 
 
 ## ANALYSIS REPORT
+
+> Historical, point-in-time notes. Scores and claims below (such as "production-ready" or "mypy-clean") reflect the date they were written and are not current status. For current status, see [Production Readiness](#production-readiness).
 
 <details>
 
@@ -1162,7 +1357,7 @@ ask for it. With healing off, every code path is exactly what it was before.
 stateDiagram-v2
     [*] --> Analyze
     Analyze --> Retrieve: deterministic query analysis
-    Retrieve --> Rerank: hybrid BM25 + vector, RRF
+    Retrieve --> Rerank: vector or hybrid RRF, plus multi-query RRF on broad retries
     Rerank --> Generate: cross-encoder (if enabled)
     Generate --> Verify
     Verify --> [*]: PASS → answer + citations
@@ -1181,7 +1376,7 @@ stateDiagram-v2
 | Node     | Component                                                                                                              | LLM call?      |
 | -------- | ---------------------------------------------------------------------------------------------------------------------- | -------------- |
 | Analyze  | `query_analysis.analyze_query`                                                                                         | no             |
-| Retrieve | `RAGPipeline._retrieve` (vector or hybrid) via `PipelineBackend`; multi-query RRF fusion on broad retries              | no             |
+| Retrieve | `RAGPipeline._retrieve` (vector or hybrid) via `PipelineBackend`; multi-query RRF on broad retries is a separate stage from hybrid RRF | no             |
 | Rerank   | `RAGPipeline._apply_reranker` — always scored against the **original** question                                        | no             |
 | Generate | `Generator.generate` — default prompt on attempt 1, repair prompt afterwards; always answers the **original** question | yes            |
 | Verify   | `Verifier` — deterministic checks, then an LLM judge only if those pass                                                | judge only     |
