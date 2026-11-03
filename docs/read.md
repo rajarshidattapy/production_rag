@@ -13,6 +13,7 @@
 - Self-healing architecture oversimplifies the actual state machine: query analysis, failure classification, adaptive retrieval, query rewriting and bounded retries deserve explicit representation.
 - Citation generation, citation metadata construction and citation verification are different operations and aren't sufficiently distinguished.
 - Observability is represented too narrowly instead of showing instrumentation across the entire pipeline.
+- **Status:** production-oriented, not production-validated. It has not been run in a production deployment, and its Docker deployment and CI workflows have not been exercised. [++Production Readiness++](https://github.com/rajarshidattapy/production_rag#production-readiness) lists what has been verified, what has not, and the known gaps.
 
 
 

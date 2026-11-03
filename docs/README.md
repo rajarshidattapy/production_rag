@@ -3,9 +3,6 @@
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
 
 A **Retrieval-Augmented Generation (RAG)** service built with FastAPI, ChromaDB, and OpenAI, OpenRouter, or Anthropic models. It goes from a vector-search baseline to optional hybrid retrieval, optional cross-encoder reranking, optional self-healing, and LLM-as-judge evaluation, with Prometheus metrics in the HTTP service and an OpenTelemetry/Langfuse instrumentation wrapper for library use.
-
-**Status:** production-oriented, not production-validated. It has not been run in a production deployment, and its Docker deployment and CI workflows have not been exercised. [Production Readiness](#production-readiness) lists what has been verified, what has not, and the known gaps.
-
 ---
 
 ## High-level overview
