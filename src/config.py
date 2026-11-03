@@ -113,11 +113,26 @@ class Settings(BaseSettings):
     # retries when explicitly allowed.
     healing_rerank_on_retry: bool = False
 
+    # ---------- Accounts and chat history ----------
+    # SQLite file holding accounts and chats. Defaults to <data_dir>/chat.db.
+    chat_db_path: Path | None = None
+    # Turn off once accounts exist; scripts/manage_users.py can still create them.
+    allow_signup: bool = True
+    min_password_length: int = Field(default=8, ge=8)
+    session_ttl_hours: float = Field(default=720.0, gt=0)
+    # Always set on requests that arrive over HTTPS. Turn on when a proxy terminates
+    # TLS and forwards plain HTTP, since the app can't see the original scheme there.
+    session_cookie_secure: bool = False
+
     # ---------- Logging ----------
     log_level: str = "INFO"
 
     # ---------- API / CLI ----------
     api_url: str = "http://localhost:8000"
+
+    @property
+    def chat_db_file(self) -> Path:
+        return self.chat_db_path or self.data_dir / "chat.db"
 
 
 settings = Settings()

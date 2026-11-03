@@ -446,6 +446,7 @@ class TestEvaluationRunner:
                     source="doc1.txt",
                     filename="doc1.txt",
                     text_snippet="Full document text",
+                    text="Full document text",
                     score=0.9,
                 )
             ],

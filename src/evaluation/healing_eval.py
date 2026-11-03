@@ -146,7 +146,7 @@ class HealingEvaluator:
         rec.baseline_answer = base_answer
         rec.baseline_refused = is_refusal(base_answer)
         base_contexts = [
-            {"document": c.text_snippet, "metadata": {"source": c.source}} for c in base_citations
+            {"document": c.text, "metadata": {"source": c.source}} for c in base_citations
         ]
         if base_contexts:
             rec.baseline_faithfulness, rec.baseline_relevance = self._score(

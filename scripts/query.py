@@ -155,7 +155,7 @@ def main() -> None:
             page_info = f", p. {c.page}" if c.page is not None else ""
             print(f"\n[{i}] {c.filename}{page_info}{score_info}")
             print(f"    Source: {c.source}")
-            print(f"    Snippet: {c.text_snippet[:120]}...")
+            print(f"    Snippet: {c.text_snippet}")
 
     print("\n" + "=" * 60)
 

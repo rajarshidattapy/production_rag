@@ -13,6 +13,7 @@ coverage.xml
 .code-review-graph
 data/chroma_db
 data/eval_results
+data/chat.db*
 *.log
 .env
 .env.local

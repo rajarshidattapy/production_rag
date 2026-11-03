@@ -9,14 +9,151 @@
 <body><div class="app">
   <aside class="sidebar"><div class="brand">RAG <span>Desk</span></div><button class="new-chat" id="newChat">+ New chat</button>
     <button class="new-chat dash-open" id="openDash" type="button" title="Open the observability dashboard"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M2 14V8M6.5 14V2M11 14V6M14 14H1"/></svg>Observability</button>
-    <div class="notice" id="uploadNotice"></div><input id="files" type="file" hidden><input id="keepDocs" type="checkbox" hidden><button id="upload" type="button" hidden></button>
+    <div class="notice" id="uploadNotice"></div>
     <div class="history-label">Your chats</div><nav id="history" aria-label="Chat history"></nav>
-    <div class="side-footer"><details><summary>Retrieval options</summary><div class="options"><label>Top results <input id="topK" type="number" min="1" max="20" value="5"></label><div class="checks"><label><input id="hybrid" type="checkbox"> Hybrid</label><label><input id="reranker" type="checkbox"> Re-rank</label><label><input id="healing" type="checkbox"> Self-heal</label></div></div></details><details style="margin-top:9px"><summary>API access</summary><label class="options">Bearer token<input id="apiKey" type="text" placeholder="Optional"></label></details><div class="notice" id="stats"></div></div>
+    <div class="side-footer"><details><summary>Retrieval options</summary><div class="options"><label>Top results <input id="topK" type="number" min="1" max="20" value="5"></label><div class="checks"><label><input id="hybrid" type="checkbox"> Hybrid</label><label><input id="reranker" type="checkbox"> Re-rank</label><label><input id="healing" type="checkbox"> Self-heal</label></div></div></details><details style="margin-top:9px"><summary>API access</summary><label class="options">Bearer token<input id="apiKey" type="text" placeholder="Optional"></label></details><div class="notice" id="stats"></div><div class="account"><span id="accountName"></span><button class="link" id="signOut" type="button">Sign out</button></div></div>
   </aside>
   <main class="workspace"><header class="topbar"><div><div id="chatTitle">New chat</div><div id="chatDocs">No PDFs attached</div></div><div class="status" id="status">Checking server...</div></header><section id="chat" aria-live="polite"></section><div class="composer-wrap"><form id="chatForm"><input id="chatFiles" type="file" accept="application/pdf,.pdf" multiple hidden><button class="attach" id="attachFiles" type="button" title="Add PDFs to this chat" aria-label="Add PDFs to this chat">+</button><input id="question" autocomplete="off" placeholder="Ask anything about your PDFs..." required><button>Send</button></form></div></main>
 </div>
+<div class="auth" id="auth" hidden><form id="authForm"><div class="brand">RAG <span>Desk</span></div><p id="authIntro"></p>
+  <label>Username<input id="authUser" autocomplete="username" required></label>
+  <label>Password<input id="authPass" type="password" required></label>
+  <label>API key, if this server requires one<input id="authKey" type="password" autocomplete="off"></label>
+  <div class="notice error" id="authError" role="alert"></div>
+  <button id="authSubmit" type="submit"></button><button class="link" id="authToggle" type="button"></button>
+</form></div>
 <script>
-const $=id=>document.getElementById(id),STORE='rag-desk-chats-v1';let chats=JSON.parse(localStorage.getItem(STORE)||'[]'),activeId=localStorage.getItem('rag-desk-active');const apiKey=$('apiKey');apiKey.value=localStorage.ragApiKey||'';apiKey.oninput=()=>localStorage.ragApiKey=apiKey.value;const id=()=>`${Date.now()}-${Math.random().toString(36).slice(2,8)}`;function save(){localStorage.setItem(STORE,JSON.stringify(chats));localStorage.setItem('rag-desk-active',activeId||'')}function active(){return chats.find(c=>c.id===activeId)}function newChat(title='New chat',files=[]){const chat={id:id(),title,files,createdAt:Date.now(),messages:[]};chats.unshift(chat);activeId=chat.id;save();render();return chat}if(!active())newChat();function headers(type){const h={};if(type)h['Content-Type']=type;if(apiKey.value.trim())h.Authorization=`Bearer ${apiKey.value.trim()}`;return h}async function request(path,options={}){const response=await fetch(path,options),body=await response.json().catch(()=>({}));if(!response.ok)throw new Error(body.detail||`Request failed (${response.status})`);return body}function notice(text,error=false){const el=$('uploadNotice');el.textContent=text;el.className=`notice${error?' error':''}`}function deleteChat(chatId){const item=chats.find(c=>c.id===chatId);if(!item||!confirm(`Delete “${item.title}”? This only removes the saved chat history.`))return;chats=chats.filter(c=>c.id!==chatId);if(activeId===chatId)activeId=chats[0]?.id||null;if(!activeId)newChat();else{save();render()}}function renderHistory(){const history=$('history');history.replaceChildren();chats.forEach(item=>{const row=document.createElement('div');row.className='chat-row';const button=document.createElement('button');button.className=`chat-item${item.id===activeId?' active':''}`;button.onclick=()=>{activeId=item.id;save();render()};const name=document.createElement('span');name.className='chat-name';name.textContent=item.title;button.append(name);if(item.files.length){const files=document.createElement('span');files.className='chat-files';files.textContent=item.files.join(', ');button.append(files)}const remove=document.createElement('button');remove.className='delete-chat';remove.title=`Delete ${item.title}`;remove.setAttribute('aria-label',remove.title);remove.textContent='×';remove.onclick=()=>deleteChat(item.id);row.append(button,remove);history.append(row)})}function sourcesNode(citations){const box=document.createElement('details');box.className='sources';const sum=document.createElement('summary');sum.textContent=`Sources (${citations.length})`;box.append(sum);citations.forEach((c,i)=>{const card=document.createElement('details');card.className='source';const head=document.createElement('summary');const num=document.createElement('span');num.className='src-num';num.textContent=i+1;const name=document.createElement('span');name.className='src-name';name.textContent=(c.filename||c.source||'unknown').replace(/^[0-9a-f]{32}_/,'')+(c.page?`, p. ${c.page}`:'');head.append(num,name);if(typeof c.score==='number'){const sc=document.createElement('span');sc.className='src-score';sc.textContent=c.score.toFixed(2);head.append(sc)}const text=(c.text_snippet||'').replace(/\s+/g,' ').trim();const prev=document.createElement('div');prev.className='src-preview';prev.textContent=text.length>180?text.slice(0,180).trimEnd()+'…':text;const full=document.createElement('div');full.className='src-full';full.textContent=text;card.append(head,prev,full);box.append(card)});return box}function messageNode(message){const el=document.createElement('div');el.className=`message ${message.role}`;el.textContent=message.text;if(message.citations?.length){el.append(sourcesNode(message.citations))}if(message.healing){const meta=document.createElement('div');meta.className='meta';meta.textContent=`Self-healing: ${message.healing.status}; attempts: ${message.healing.attempts}`;el.append(meta)}return el}function render(){const current=active();$('chatTitle').textContent=current.title;$('chatDocs').textContent=current.files.length?current.files.join(', '):'No PDFs attached';renderHistory();const area=$('chat');area.replaceChildren();if(!current.messages.length){const empty=document.createElement('div');empty.className='empty';empty.innerHTML='<h1>How can I help?</h1><div>Upload one or more PDFs from the sidebar, then ask a question grounded in those documents.</div>';area.append(empty)}else current.messages.forEach(m=>area.append(messageNode(m)));area.scrollTop=area.scrollHeight}function addMessage(role,text,citations=[],healing=null){active().messages.push({role,text,citations,healing});save();render()}async function refreshStats(){try{const s=await request('/stats',{headers:headers()});$('stats').textContent=`${s.chunks_in_store} chunks · ${s.llm_model}`}catch{$('stats').textContent=''}}async function health(){try{await request('/healthz');$('status').textContent='● Server connected';$('status').style.color='#9ae6b4';await refreshStats()}catch{$('status').textContent='● Server unavailable';$('status').style.color='var(--danger)'}}$('newChat').onclick=()=>newChat();$('upload').onclick=async()=>{const files=[...$('files').files];if(!files.length)return notice('Choose at least one PDF.',true);const current=newChat(files.length===1?files[0].name:`${files.length} PDFs`,files.map(f=>f.name)),button=$('upload');button.disabled=true;try{for(let i=0;i<files.length;i++){notice(`Uploading ${i+1}/${files.length}: ${files[i].name}`);const uploaded=await request(`/upload?filename=${encodeURIComponent(files[i].name)}`,{method:'POST',headers:headers('application/pdf'),body:files[i]});notice(`Ingesting ${files[i].name}...`);const result=await request('/ingest',{method:'POST',headers:headers('application/json'),body:JSON.stringify({source:uploaded.source,reset:!$('keepDocs').checked&&i===0})});notice(`${files[i].name}: ${result.chunks_ingested} chunks added (${result.total_chunks} total).`)}current.messages.push({role:'assistant',text:`I’m ready to answer questions about ${current.files.join(', ')}.`,citations:[]});save();render();$('files').value='';await refreshStats()}catch(error){notice(error.message,true)}finally{button.disabled=false}};$('chatForm').onsubmit=async event=>{event.preventDefault();const input=$('question'),question=input.value.trim();if(!question)return;const current=active();input.value='';if(current.title==='New chat'){current.title=question.slice(0,42);save()}addMessage('user',question);const button=event.currentTarget.querySelector('button');button.disabled=true;try{const result=await request('/query',{method:'POST',headers:headers('application/json'),body:JSON.stringify({question,top_k:Number($('topK').value)||5,use_hybrid:$('hybrid').checked,use_reranker:$('reranker').checked,self_heal:$('healing').checked})});addMessage('assistant',result.answer,result.citations||[],result.healing)}catch(error){addMessage('assistant',`Error: ${error.message}`)}finally{button.disabled=false;input.focus()}};render();health();
+const $=id=>document.getElementById(id);
+const LEGACY_STORE='rag-desk-chats-v1',DEFAULT_TITLE='New chat',SIGNED_OUT='Please sign in.';
+// Chats live on the server. `messages` is null until a chat is opened. `draft` is a chat
+// that has not been saved yet, so opening "New chat" leaves no empty rows behind.
+let chats=[],activeId=null,draft=null,account=null,authMode='login';
+const apiKey=$('apiKey');
+apiKey.value=$('authKey').value=localStorage.ragApiKey||'';
+function setApiKey(value){apiKey.value=$('authKey').value=value;localStorage.ragApiKey=value}
+apiKey.oninput=()=>setApiKey(apiKey.value);
+function active(){return chats.find(c=>c.id===activeId)||draft}
+function newChat(){draft={id:null,title:DEFAULT_TITLE,files:[],messages:[]};activeId=null;render();return draft}
+function headers(type){const h={};if(type)h['Content-Type']=type;if(apiKey.value.trim())h.Authorization=`Bearer ${apiKey.value.trim()}`;return h}
+function errorText(detail,status){if(typeof detail==='string')return detail;if(Array.isArray(detail)&&detail[0]?.msg)return `${detail[0].loc?.at(-1)||'Request'}: ${detail[0].msg}`;return `Request failed (${status})`}
+async function request(path,options={}){
+  const response=await fetch(path,options),body=await response.json().catch(()=>({}));
+  if(!response.ok){
+    if(account&&response.status===401&&body.detail===SIGNED_OUT)showAuth('Your session ended. Please sign in again.');
+    throw new Error(errorText(body.detail,response.status));
+  }
+  return body;
+}
+function postJson(path,body){return request(path,{method:'POST',headers:headers('application/json'),body:JSON.stringify(body)})}
+function notice(text,error=false){const el=$('uploadNotice');el.textContent=text;el.className=`notice${error?' error':''}`}
+// Saves a draft on first use. Keeps the same object so an in-flight reply still lands on it.
+async function saveDraft(chat,title){
+  if(chat.id)return chat;
+  Object.assign(chat,await postJson('/chats',title?{title}:{}));
+  chats.unshift(chat);
+  if(draft===chat){draft=null;if(activeId===null)activeId=chat.id}
+  return chat;
+}
+async function openChat(chat){
+  activeId=chat.id;render();
+  if(chat.id===null||chat.messages)return;
+  try{chat.messages=(await request(`/chats/${chat.id}`,{headers:headers()})).messages;render()}
+  catch(error){notice(error.message,true)}
+}
+async function deleteChat(chat){
+  if(!confirm(`Delete “${chat.title}”? This only removes the saved chat history.`))return;
+  try{await request(`/chats/${chat.id}`,{method:'DELETE',headers:headers()})}
+  catch(error){return notice(error.message,true)}
+  chats=chats.filter(c=>c!==chat);
+  if(activeId!==chat.id)render();
+  else if(chats[0])openChat(chats[0]);
+  else newChat();
+}
+function renderHistory(){
+  const history=$('history');history.replaceChildren();
+  [...(draft?[draft]:[]),...chats].forEach(item=>{
+    const row=document.createElement('div');row.className='chat-row';
+    const button=document.createElement('button');button.className=`chat-item${item===active()?' active':''}`;button.onclick=()=>openChat(item);
+    const name=document.createElement('span');name.className='chat-name';name.textContent=item.title;button.append(name);
+    if(item.files.length){const files=document.createElement('span');files.className='chat-files';files.textContent=item.files.join(', ');button.append(files)}
+    row.append(button);
+    if(item.id){const remove=document.createElement('button');remove.className='delete-chat';remove.title=`Delete ${item.title}`;remove.setAttribute('aria-label',remove.title);remove.textContent='×';remove.onclick=()=>deleteChat(item);row.append(remove)}
+    history.append(row);
+  });
+}
+function sourcesNode(citations){const box=document.createElement('details');box.className='sources';const sum=document.createElement('summary');sum.textContent=`Sources (${citations.length})`;box.append(sum);citations.forEach((c,i)=>{const card=document.createElement('details');card.className='source';const head=document.createElement('summary');const num=document.createElement('span');num.className='src-num';num.textContent=i+1;const name=document.createElement('span');name.className='src-name';name.textContent=(c.filename||c.source||'unknown').replace(/^[0-9a-f]{32}_/,'')+(c.page?`, p. ${c.page}`:'');head.append(num,name);if(typeof c.score==='number'){const sc=document.createElement('span');sc.className='src-score';sc.textContent=c.score.toFixed(2);head.append(sc)}const text=(c.text_snippet||'').replace(/\s+/g,' ').trim();const prev=document.createElement('div');prev.className='src-preview';prev.textContent=text.length>180?text.slice(0,180).trimEnd()+'…':text;const full=document.createElement('div');full.className='src-full';full.textContent=text;if(text.endsWith('…')){let loaded=false;card.ontoggle=async()=>{if(!card.open||loaded)return;loaded=true;full.textContent='Loading…';try{full.textContent=(await request(`/chunks/${encodeURIComponent(c.chunk_id)}`,{headers:headers()})).text}catch(error){loaded=false;full.textContent=`${text} (${error.message})`}}}card.append(head,prev,full);box.append(card)});return box}function messageNode(message){const el=document.createElement('div');el.className=`message ${message.role}`;el.textContent=message.text;if(message.citations?.length){el.append(sourcesNode(message.citations))}if(message.healing){const meta=document.createElement('div');meta.className='meta';meta.textContent=`Self-healing: ${message.healing.status}; attempts: ${message.healing.attempts}`;el.append(meta)}return el}
+function render(){
+  const current=active();if(!current)return;
+  $('chatTitle').textContent=current.title;
+  $('chatDocs').textContent=current.files.length?current.files.join(', '):'No PDFs attached';
+  renderHistory();
+  const area=$('chat');area.replaceChildren();
+  if(!current.messages){const empty=document.createElement('div');empty.className='empty';empty.textContent='Loading…';area.append(empty)}
+  else if(!current.messages.length){const empty=document.createElement('div');empty.className='empty';empty.innerHTML='<h1>How can I help?</h1><div>Upload one or more PDFs from the sidebar, then ask a question grounded in those documents.</div>';area.append(empty)}
+  else current.messages.forEach(m=>area.append(messageNode(m)));
+  area.scrollTop=area.scrollHeight;
+}
+async function refreshStats(){try{const s=await request('/stats',{headers:headers()});$('stats').textContent=`${s.chunks_in_store} chunks · ${s.llm_model}`}catch{$('stats').textContent=''}}async function health(){try{await request('/healthz');$('status').textContent='● Server connected';$('status').style.color='#9ae6b4';await refreshStats()}catch{$('status').textContent='● Server unavailable';$('status').style.color='var(--danger)'}}
+function setAuthMode(mode){
+  authMode=mode;const registering=mode==='register';
+  $('authIntro').textContent=registering?'Create an account to keep your chats on this server.':'Sign in to see your chats.';
+  $('authSubmit').textContent=registering?'Create account':'Sign in';
+  $('authToggle').textContent=registering?'I already have an account':'Create an account';
+  $('authPass').autocomplete=registering?'new-password':'current-password';
+  $('authPass').minLength=registering?8:0;
+  $('authUser').pattern=registering?'[A-Za-z0-9._@+\\-]{3,64}':'.*';
+  $('authUser').title=registering?'3 to 64 letters, digits, or . _ @ + -':'';
+}
+function showAuth(message=''){
+  account=null;chats=[];draft=null;activeId=null;
+  $('history').replaceChildren();$('chat').replaceChildren();
+  $('authPass').value='';$('authError').textContent=message;$('auth').hidden=false;$('authUser').focus();
+}
+// One-time move of chats that older versions kept in this browser. They stay here until
+// the server has them, so a failed or declined import loses nothing.
+async function importLegacyChats(){
+  let legacy=[];
+  try{legacy=JSON.parse(localStorage.getItem(LEGACY_STORE)||'[]')}catch{/* unreadable: nothing to move */}
+  const worthKeeping=legacy.filter(c=>c.messages?.length);
+  if(worthKeeping.length){
+    if(sessionStorage.ragImportDeclined)return;
+    const count=worthKeeping.length===1?'1 chat':`${worthKeeping.length} chats`;
+    if(!confirm(`Move ${count} saved in this browser into the account “${account.username}”?`)){sessionStorage.ragImportDeclined='1';return}
+  }
+  const failed=[];
+  for(const chat of worthKeeping){
+    try{
+      await postJson('/chats/import',{import_id:String(chat.id),title:chat.title||DEFAULT_TITLE,files:chat.files||[],created_at:(chat.createdAt||Date.now())/1000,
+        messages:chat.messages.map(m=>({role:m.role,text:m.text,citations:m.citations||[],healing:m.healing||null}))});
+    }catch{failed.push(chat)}
+  }
+  if(failed.length){localStorage.setItem(LEGACY_STORE,JSON.stringify(failed));notice(`${failed.length} saved chat(s) could not be moved and are still in this browser.`,true)}
+  else{localStorage.removeItem(LEGACY_STORE);localStorage.removeItem('rag-desk-active')}
+}
+async function signedIn(user){
+  account=user;$('auth').hidden=true;$('accountName').textContent=user.username;
+  await importLegacyChats();
+  chats=(await request('/chats',{headers:headers()})).map(c=>({...c,messages:null}));
+  if(chats[0])openChat(chats[0]);else newChat();
+  refreshStats();
+}
+$('authForm').onsubmit=async event=>{
+  event.preventDefault();
+  const button=$('authSubmit');button.disabled=true;$('authError').textContent='';
+  setApiKey($('authKey').value);
+  try{await signedIn(await postJson(`/auth/${authMode==='register'?'register':'login'}`,{username:$('authUser').value.trim(),password:$('authPass').value}));$('authPass').value=''}
+  catch(error){showAuth(error.message)}
+  finally{button.disabled=false}
+};
+$('authToggle').onclick=()=>{setAuthMode(authMode==='login'?'register':'login');$('authError').textContent=''};
+$('signOut').onclick=async()=>{
+  try{await request('/auth/logout',{method:'POST',headers:headers()});showAuth()}
+  catch(error){notice(error.message,true)}
+};
+$('newChat').onclick=()=>newChat();
+setAuthMode('login');
+health();
+request('/auth/me',{headers:headers()}).then(signedIn).catch(error=>showAuth(error.message===SIGNED_OUT?'':error.message));
 </script>
 <script>
   $('attachFiles').onclick = () => $('chatFiles').click();
@@ -25,27 +162,30 @@ const $=id=>document.getElementById(id),STORE='rag-desk-chats-v1';let chats=JSON
     if (!files.length) return;
     const button = $('attachFiles');
     button.disabled = true;
+    const added = [];
     try {
-      const current = newChat(
-        files.length === 1 ? files[0].name : `${files.length} PDFs`,
-        files.map(file => file.name),
-      );
-      let firstFile = true;
       for (const file of files) {
         notice(`Adding ${file.name} to this chat...`);
         const uploaded = await request(`/upload?filename=${encodeURIComponent(file.name)}`, {
           method: 'POST', headers: headers('application/pdf'), body: file,
         });
-        const result = await request('/ingest', {
-          method: 'POST', headers: headers('application/json'),
-          body: JSON.stringify({source: uploaded.source, reset: firstFile}),
-        });
-        firstFile = false;
-        if (!current.files.includes(file.name)) current.files.push(file.name);
+        // Never reset here: the document store is shared, so that would delete other users' PDFs.
+        const result = await postJson('/ingest', {source: uploaded.source, reset: false});
+        added.push(file.name);
         notice(`${file.name}: ${result.chunks_ingested} chunks added.`);
       }
-      current.messages.push({role: 'assistant', text: `Added ${files.map(file => file.name).join(', ')} to this chat.`, citations: []});
-      save(); render(); await refreshStats();
+    } catch (error) {
+      notice(error.message, true);
+    }
+    try {
+      if (added.length) {
+        const title = added.length === 1 ? added[0] : `${added.length} PDFs`;
+        const chat = await saveDraft({id: null, title, files: [], messages: []}, title);
+        Object.assign(chat, await postJson(`/chats/${chat.id}/files`, {filenames: added}));
+        draft = active() === draft ? null : draft;
+        await openChat(chat);
+        await refreshStats();
+      }
     } catch (error) {
       notice(error.message, true);
     } finally {
@@ -84,26 +224,37 @@ const $=id=>document.getElementById(id),STORE='rag-desk-chats-v1';let chats=JSON
     if (!question) return;
     const current = active();
     input.value = '';
-    if (current.title === 'New chat') { current.title = question.slice(0, 42); save(); }
-    addMessage('user', question);
+    current.messages.push({role: 'user', text: question, citations: []});
+    render();
     const button = event.currentTarget.querySelector('button:last-child');
     button.disabled = true;
     const typing = showTyping();
     try {
-      const result = await request('/query', {
-        method:'POST', headers:headers('application/json'),
-        body:JSON.stringify({question, top_k:Number($('topK').value) || 5, use_hybrid:$('hybrid').checked, use_reranker:$('reranker').checked, self_heal:$('healing').checked}),
-      });
-      addMessage('assistant', result.answer, result.citations || [], result.healing);
+      await saveDraft(current);
+      const result = await postJson(`/chats/${current.id}/messages`, {question, top_k: Number($('topK').value) || 5, use_hybrid: $('hybrid').checked, use_reranker: $('reranker').checked, self_heal: $('healing').checked});
+      Object.assign(current, result.chat);
+      chats = [current, ...chats.filter(c => c !== current)];
+      current.messages.push({role: 'assistant', text: result.answer, citations: result.citations || [], healing: result.healing});
     } catch (error) {
-      addMessage('assistant', `Error: ${error.message}`);
+      // The server saves a question only with its answer, so this one isn't in the history.
+      current.messages.push({role: 'assistant', text: `Error: ${error.message}\nThis question was not saved.`, citations: []});
+      if (!input.value) input.value = question;
     } finally {
       typing.remove();
       button.disabled = false;
+      render();
       input.focus();
     }
   };
 </script><style>
+  .auth { position:fixed; inset:0; z-index:50; display:grid; place-items:center; padding:20px; background:var(--bg); } .auth[hidden] { display:none; }
+  .auth form { display:grid; gap:12px; width:min(360px,100%); padding:24px; border:1px solid var(--line); border-radius:12px; background:var(--panel); } .auth .brand { padding:0; } .auth p { margin:0; color:var(--muted); }
+  .auth label { display:grid; gap:5px; color:var(--muted); font-size:12px; } .auth input { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:8px; color:var(--text); background:var(--panel-2); font:inherit; }
+  .auth #authSubmit { padding:10px 12px; border:0; border-radius:8px; color:#000; background:var(--accent); font:inherit; font-weight:600; cursor:pointer; } .auth #authSubmit:disabled { opacity:.6; } .auth .notice:empty { display:none; }
+  .link { padding:0; border:0; color:var(--muted); background:none; font:inherit; text-decoration:underline; cursor:pointer; } .link:hover { color:var(--text); }
+  #history { overflow-x:hidden; } .chat-row { min-width:0; } .chat-item { min-width:0; } .chat-name,.chat-files { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .account { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:9px; color:var(--muted); font-size:12px; } .account span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+</style><style>
   /* ---- Observability dashboard (dark; tokens from the dataviz reference palette) ---- */
   .dash-open { display:flex; align-items:center; gap:9px; width:100%; text-align:left; }
   .dash-open svg { flex:none; opacity:.85; }
@@ -233,9 +384,9 @@ const $=id=>document.getElementById(id),STORE='rag-desk-chats-v1';let chats=JSON
 <script id="obsLib">
   /* Pure helpers (no DOM): Prometheus text parsing and summarising. */
   const Obs = (() => {
-    const SYSTEM_PATHS = new Set(['/metrics', '/stats', '/healthz', '/readyz', '/', '/index.html', '/favicon.ico']);
+    const SYSTEM_PATHS = new Set(['/metrics', '/stats', '/healthz', '/readyz', '/', '/index.html', '/favicon.ico', '/auth/register', '/auth/login', '/auth/logout', '/auth/me', '/chats', '/chats/import', '/chats/{chat_id}', '/chats/{chat_id}/files', '/chunks/{chunk_id}']);
     const FRIENDLY = {
-      '/query': 'Ask a question', '/query/stream': 'Ask a question (streaming)', '/upload': 'Upload a PDF',
+      '/chats/{chat_id}/messages': 'Ask a question', '/query': 'Ask a question (API)', '/query/stream': 'Ask a question (streaming)', '/upload': 'Upload a PDF',
       '/ingest': 'Index a document', '/ingest/async': 'Index in the background',
     };
     const FAILURES = {
@@ -332,7 +483,7 @@ const $=id=>document.getElementById(id),STORE='rag-desk-chats-v1';let chats=JSON
       const endpoints = [...paths.values()].filter(e => e.requests > 0)
         .map(finish).sort((a, b) => b.requests - a.requests)
         .map(e => ({ ...e, name: FRIENDLY[e.path] || e.path }));
-      const askPaths = ['/query', '/query/stream'];
+      const askPaths = ['/chats/{chat_id}/messages', '/query', '/query/stream'];
       const asked = endpoints.filter(e => askPaths.includes(e.path)).reduce((n, e) => n + e.ok, 0);
       return { total: finish(all), endpoints, asked, heal };
     }

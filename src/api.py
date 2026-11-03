@@ -21,9 +21,9 @@ import uuid
 from collections import OrderedDict
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from prometheus_client import (
@@ -36,6 +36,7 @@ from prometheus_client import (
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from src.chat.store import AccountLockedError, ChatStore, User, UsernameTakenError
 from src.config import settings as _settings
 from src.generation.citations import CitationFormatter
 from src.healing.metrics import HEALING_REGISTRY
@@ -376,6 +377,11 @@ class CitationResponse(BaseModel):
     page: int | None = None
 
 
+class ChunkResponse(BaseModel):
+    chunk_id: str
+    text: str
+
+
 class HealingResponse(BaseModel):
     status: str
     attempts: int
@@ -478,6 +484,12 @@ def _resolve_ingest_source(source: str) -> Path:
             status_code=400,
             detail=f"Path must be inside the configured data directory ({allowed_root}).",
         ) from None
+
+    # The account database lives in the data directory too. A single file loads as text
+    # whatever its extension, which would make password hashes and private chats searchable.
+    chat_db = Path(_settings.chat_db_file).resolve()
+    if source_path.parent == chat_db.parent and source_path.name.startswith(chat_db.name):
+        raise HTTPException(status_code=400, detail="This path cannot be ingested.")
 
     if not source_path.exists():
         raise HTTPException(
@@ -731,6 +743,265 @@ async def query(request: QueryRequest, response: Response) -> QueryResponse:
         return QueryResponse(answer=answer, citations=citation_responses, healing=healing)
     finally:
         request_usage.reset(token)
+
+
+@app.get("/chunks/{chunk_id}", response_model=ChunkResponse, dependencies=[_auth])
+def get_chunk(chunk_id: str) -> ChunkResponse:
+    """Return the full text of a passage, for expanding a citation's short ``text_snippet``."""
+    chunk = get_pipeline().get_chunk(chunk_id)
+    if chunk is None:
+        raise HTTPException(
+            status_code=404, detail="This passage is no longer in the document store."
+        )
+    return ChunkResponse(chunk_id=chunk_id, text=chunk["document"])
+
+
+# ---------------------------------------------------------------------------
+# Accounts and chat history. Login uses a cookie because the Authorization header
+# already carries RAG_API_KEY, and HttpOnly keeps the token away from page scripts.
+# Accounts own chat history only: /query, /upload, and /ingest stay open to anyone who
+# passes the API key check, and documents are shared by every user.
+# ---------------------------------------------------------------------------
+_SESSION_COOKIE = "rag_session"
+_chat_store: ChatStore | None = None
+_chat_store_lock = threading.Lock()
+
+
+def get_chat_store() -> ChatStore:
+    """Return the shared store, reopening it if the configured path has changed."""
+    global _chat_store
+    with _chat_store_lock:
+        path = Path(_settings.chat_db_file)
+        if _chat_store is None or _chat_store.path != path:
+            _chat_store = ChatStore(path)
+        return _chat_store
+
+
+def _current_user(rag_session: str | None = Cookie(None)) -> User:
+    user = get_chat_store().user_for_session(rag_session) if rag_session else None
+    if user is None:
+        raise HTTPException(status_code=401, detail="Please sign in.")
+    return user
+
+
+_signed_in = Depends(_current_user)
+
+
+def _start_session(user: User, request: Request, response: Response) -> None:
+    ttl_seconds = _settings.session_ttl_hours * 3600
+    response.set_cookie(
+        _SESSION_COOKIE,
+        get_chat_store().create_session(user.id, ttl_seconds),
+        max_age=int(ttl_seconds),
+        httponly=True,
+        samesite="strict",
+        secure=_settings.session_cookie_secure or request.url.scheme == "https",
+    )
+
+
+class RegisterRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=64, pattern=r"^[A-Za-z0-9._@+-]+$")
+    password: str = Field(..., max_length=256)
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(..., max_length=64)
+    password: str = Field(..., max_length=256)
+
+
+class AccountResponse(BaseModel):
+    username: str
+
+
+class ChatCreateRequest(BaseModel):
+    title: str | None = Field(None, min_length=1, max_length=200)
+
+
+class ChatSummary(BaseModel):
+    id: str
+    title: str
+    files: list[str]
+    created_at: float
+    updated_at: float
+
+
+class ChatMessage(BaseModel):
+    role: str
+    text: str
+    citations: list[CitationResponse] = []
+    healing: HealingResponse | None = None
+    created_at: float
+
+
+class ChatDetail(ChatSummary):
+    messages: list[ChatMessage]
+
+
+class ChatFilesRequest(BaseModel):
+    filenames: list[str] = Field(..., min_length=1, max_length=100)
+
+
+class ChatTurnResponse(QueryResponse):
+    chat: ChatSummary
+
+
+class ImportedMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    text: str = Field(..., max_length=200_000)
+    citations: list[CitationResponse] = Field(default=[], max_length=200)
+    healing: HealingResponse | None = None
+
+
+class ChatImportRequest(BaseModel):
+    import_id: str = Field(..., min_length=1, max_length=100)
+    title: str = Field(..., min_length=1, max_length=200)
+    files: list[str] = Field(default=[], max_length=100)
+    created_at: float
+    messages: list[ImportedMessage] = Field(..., max_length=10_000)
+
+
+class ChatImportResponse(BaseModel):
+    imported: bool
+
+
+@app.post("/auth/register", response_model=AccountResponse, status_code=201, dependencies=[_auth])
+def register(body: RegisterRequest, request: Request, response: Response) -> AccountResponse:
+    """Create an account and sign in to it."""
+    if not _settings.allow_signup:
+        raise HTTPException(status_code=403, detail="Sign-up is turned off on this server.")
+    if len(body.password) < _settings.min_password_length:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Password must be at least {_settings.min_password_length} characters.",
+        )
+    try:
+        user = get_chat_store().create_user(body.username, body.password)
+    except UsernameTakenError:
+        raise HTTPException(status_code=409, detail="That username is taken.") from None
+    _start_session(user, request, response)
+    return AccountResponse(username=user.username)
+
+
+@app.post("/auth/login", response_model=AccountResponse, dependencies=[_auth])
+def login(body: LoginRequest, request: Request, response: Response) -> AccountResponse:
+    """Sign in. Repeated wrong passwords lock the account for a few minutes."""
+    try:
+        user = get_chat_store().authenticate(body.username, body.password)
+    except AccountLockedError:
+        raise HTTPException(
+            status_code=429, detail="Too many failed attempts. Try again in a few minutes."
+        ) from None
+    if user is None:
+        raise HTTPException(status_code=401, detail="Wrong username or password.")
+    _start_session(user, request, response)
+    return AccountResponse(username=user.username)
+
+
+@app.post("/auth/logout", status_code=204, dependencies=[_auth])
+def logout(response: Response, rag_session: str | None = Cookie(None)) -> None:
+    """End this session on the server, not just in this browser."""
+    if rag_session:
+        get_chat_store().delete_session(rag_session)
+    response.delete_cookie(_SESSION_COOKIE)
+
+
+@app.get("/auth/me", response_model=AccountResponse, dependencies=[_auth])
+def me(user: User = _signed_in) -> AccountResponse:
+    return AccountResponse(username=user.username)
+
+
+@app.get("/chats", response_model=list[ChatSummary], dependencies=[_auth])
+def list_chats(user: User = _signed_in) -> list[dict[str, Any]]:
+    """List your chats, most recently active first, without their messages."""
+    return get_chat_store().list_chats(user.id)
+
+
+@app.post("/chats", response_model=ChatSummary, status_code=201, dependencies=[_auth])
+def create_chat(body: ChatCreateRequest, user: User = _signed_in) -> dict[str, Any]:
+    store = get_chat_store()
+    return store.create_chat(user.id, body.title) if body.title else store.create_chat(user.id)
+
+
+@app.post("/chats/import", response_model=ChatImportResponse, dependencies=[_auth])
+def import_chat(body: ChatImportRequest, user: User = _signed_in) -> ChatImportResponse:
+    """Copy in a chat saved elsewhere. Sending the same ``import_id`` again changes nothing."""
+    imported = get_chat_store().import_chat(
+        user.id,
+        body.import_id,
+        body.title,
+        body.files,
+        body.created_at,
+        [m.model_dump(mode="json", exclude_none=True) for m in body.messages],
+    )
+    return ChatImportResponse(imported=imported)
+
+
+@app.get(
+    "/chats/{chat_id}",
+    response_model=ChatDetail,
+    response_model_exclude_none=True,
+    dependencies=[_auth],
+)
+def get_chat(chat_id: str, user: User = _signed_in) -> dict[str, Any]:
+    chat = get_chat_store().get_chat(user.id, chat_id)
+    if chat is None:
+        raise HTTPException(status_code=404, detail="No chat found with that ID.")
+    return chat
+
+
+@app.delete("/chats/{chat_id}", status_code=204, dependencies=[_auth])
+def delete_chat(chat_id: str, user: User = _signed_in) -> None:
+    """Delete a chat's history. Documents it added stay in the shared store."""
+    if not get_chat_store().delete_chat(user.id, chat_id):
+        raise HTTPException(status_code=404, detail="No chat found with that ID.")
+
+
+@app.post(
+    "/chats/{chat_id}/files",
+    response_model=ChatDetail,
+    response_model_exclude_none=True,
+    dependencies=[_auth],
+)
+def add_chat_files(chat_id: str, body: ChatFilesRequest, user: User = _signed_in) -> dict[str, Any]:
+    """Record documents that were ingested for this chat."""
+    chat = get_chat_store().add_files(user.id, chat_id, body.filenames)
+    if chat is None:
+        raise HTTPException(status_code=404, detail="No chat found with that ID.")
+    return chat
+
+
+@app.post(
+    "/chats/{chat_id}/messages",
+    response_model=ChatTurnResponse,
+    response_model_exclude_none=True,
+    dependencies=[_auth],
+)
+async def send_chat_message(
+    chat_id: str, body: QueryRequest, response: Response, user: User = _signed_in
+) -> ChatTurnResponse:
+    """Ask a question in a chat and save it with its answer.
+
+    Both are saved together once the answer exists, so a failed query leaves the history
+    unchanged. Answers don't use earlier messages: each question is retrieved on its own.
+    """
+    store = get_chat_store()
+    if not await asyncio.to_thread(store.chat_exists, user.id, chat_id):
+        raise HTTPException(status_code=404, detail="No chat found with that ID.")
+
+    result = await query(body, response)
+
+    chat = await asyncio.to_thread(
+        store.add_exchange,
+        user.id,
+        chat_id,
+        body.question.strip(),
+        result.answer,
+        [c.model_dump(exclude_none=True) for c in result.citations],
+        result.healing.model_dump(mode="json", exclude_none=True) if result.healing else None,
+    )
+    if chat is None:  # deleted while the answer was being generated
+        raise HTTPException(status_code=404, detail="No chat found with that ID.")
+    return ChatTurnResponse(**result.model_dump(), chat=ChatSummary(**chat))
 
 
 # ---------------------------------------------------------------------------

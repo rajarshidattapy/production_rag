@@ -5,10 +5,30 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+SNIPPET_CHARS = 180
+
+
+def shorten_snippet(text: str, limit: int = SNIPPET_CHARS) -> str:
+    """Collapse whitespace and cut at a word boundary, marking any cut with an ellipsis."""
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    cut = text[: limit - 1]
+    last_space = cut.rfind(" ")
+    # Text with few spaces (CJK, long URLs) has no useful word boundary to cut at.
+    if last_space >= limit // 2:
+        cut = cut[:last_space]
+    return cut.rstrip(" ,;:") + "…"
+
 
 @dataclass
 class Citation:
-    """A single source citation with locator information."""
+    """A single source citation with locator information.
+
+    ``text_snippet`` is a short preview for display. ``text`` is the whole passage, for
+    in-process consumers such as evaluation; it is not serialized into API responses, where
+    ``GET /chunks/{chunk_id}`` serves it on demand.
+    """
 
     chunk_id: str
     source: str
@@ -16,6 +36,7 @@ class Citation:
     text_snippet: str
     score: float = 0.0
     page: int | None = None
+    text: str = ""
 
 
 class CitationFormatter:
@@ -32,14 +53,16 @@ class CitationFormatter:
                 score = r.get("score")
             if score is None:
                 score = 0.0
+            document = r.get("document", "")
             citations.append(
                 Citation(
                     chunk_id=r.get("id", f"chunk-{i}"),
                     source=meta.get("source", str(meta)),
                     filename=meta.get("filename", "unknown"),
-                    text_snippet=r.get("document", ""),
+                    text_snippet=shorten_snippet(document),
                     score=score,
                     page=meta.get("page"),
+                    text=document,
                 )
             )
         return citations
@@ -66,8 +89,7 @@ class CitationFormatter:
             if citations:
                 result += "\n\n---\n**Sources:**\n"
                 for i, c in enumerate(citations, start=1):
-                    snippet = c.text_snippet.replace("\n", " ")[:150]
-                    result += f"{i}. {CitationFormatter._locator(c)} — *{snippet}...*\n"
+                    result += f"{i}. {CitationFormatter._locator(c)} — *{c.text_snippet}*\n"
         elif format == "inline":
             if citations:
                 result += "\n\n**Citations:**\n"

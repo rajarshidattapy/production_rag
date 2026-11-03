@@ -4,9 +4,6 @@
 
 ## Not implemented yet, but identified as next production upgrades:
 
-- Shortened citation previews
-- Persistent server-side chat history/users instead of browser `localStorage`
-- CLI-provider mode using Codex, Claude Code, or OpenCode locally
 - Background/asynchronous ingestion UI for very large document collections
 - **Next scaling steps:** API replicas, a response cache, a GPU or separate reranker, and Qdrant only if Chroma proves to be the bottleneck.
 - **Formatting and type errors:** `ruff format` still flags [`generator.py`](http://generator.py), `[test_healing_](#orca-native-chat-file=test_healing_evaluation.py)[evaluation.py](http://evaluation.py)` and `[test_](#orca-native-chat-file=test_pipeline.py)[pipeline.py](http://pipeline.py)`, and `mypy` still reports 59 errors in untouched files, which I left alone.
@@ -16,6 +13,14 @@
 - Citation generation, citation metadata construction and citation verification are different operations and aren't sufficiently distinguished.
 - Observability is represented too narrowly instead of showing instrumentation across the entire pipeline.
 - **Status:** production-oriented, not production-validated. It has not been run in a production deployment, and its Docker deployment and CI workflows have not been exercised. [++Production Readiness++](https://github.com/rajarshidattapy/production_rag#production-readiness) lists what has been verified, what has not, and the known gaps.
+- **Shared documents:** besides the shared retrieval above, [`/ingest`](#orca-native-chat-file=%2Fingest) with `reset: true` still clears the store for everyone.
+- **No follow-up context:** answers don't use earlier messages, so "what about page 3?" won't know what "that" refers to. The saved history makes this possible to add.
+- **No self-service password reset:** an operator has to do it with the script.
+- **Login lockout is per account, not per IP:** someone can keep a known account locked, or try one password across many accounts.
+- **Dashboard undercount (already there):** unhandled 500s don't appear in the dashboard's error rate, because the metrics code never sees them. The stubbed LLM failure didn't show up there.
+
+  
+
 
 
 

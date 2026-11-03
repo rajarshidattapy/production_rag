@@ -154,9 +154,7 @@ class EvaluationRunner:
         )
 
         # Build contexts from citations for faithfulness scoring
-        contexts = [
-            {"document": c.text_snippet, "metadata": {"source": c.source}} for c in citations
-        ]
+        contexts = [{"document": c.text, "metadata": {"source": c.source}} for c in citations]
 
         # Score faithfulness
         score_result = self.scorer.score(answer, contexts)

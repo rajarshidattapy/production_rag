@@ -95,6 +95,27 @@ PDFs are chunked one page at a time, and each chunk records its `page` (the phys
 - **Page breaks:** Chunks don't cross pages, so a sentence split by a page break is split in the index too.
 - **No page metadata:** If nothing in the store has page metadata, page references are ignored and retrieval works as usual. PDFs indexed before this feature need re-ingesting, with `reset` so the old chunks are removed.
 
+### Accounts and chat history
+
+The browser UI requires an account. Chats are stored on the server in SQLite (`data/chat.db`, or `RAG_CHAT_DB_PATH`), so they follow the user across browsers and devices and survive restarts. Chats that older versions left in a browser's `localStorage` are moved into the account after the user confirms, the first time they sign in on that browser.
+
+- **What an account protects:** Chat history only. Other users can't see or change your chats. **Documents are not per-user:** every account searches the same vector store, and `/query`, `/upload`, and `/ingest` don't need a login (they follow `RAG_API_KEY`), so existing API clients keep working.
+- **What gets saved:** A question and its answer are saved together when the answer is ready. A failed query saves nothing. `/query` and `/query/stream` don't save anything.
+- **Follow-up questions:** Answers don't use earlier messages yet. Each question is retrieved and answered on its own.
+- **Attaching PDFs:** Adds to the shared store. It no longer sends `reset`, which would delete every user's documents.
+- **Passwords and sessions:** Passwords are hashed with scrypt. Sessions use an `HttpOnly`, `SameSite=Strict` cookie, and only a hash of the token is stored. Five wrong passwords lock an account for five minutes.
+- **Backups:** Back up `data/chat.db`, using `sqlite3 data/chat.db ".backup backup.db"` rather than copying the file while the server runs.
+- **Scaling:** SQLite is safe for several workers on one host. It must not sit on a network share, so replicas on separate hosts need a database server first.
+
+Set `RAG_ALLOW_SIGNUP=false` once the accounts you want exist, otherwise anyone who can reach the server can register. Manage accounts from the project root (`/app` in the container):
+
+```bash
+python -m scripts.manage_users create alice        # prompts for a password
+python -m scripts.manage_users set-password alice  # also clears a lockout and ends their sessions
+python -m scripts.manage_users list
+python -m scripts.manage_users delete alice        # also deletes their chat history
+```
+
 ### Retrieval modes
 
 `use_hybrid` and `use_reranker` are independent request fields, so there are four modes. The API and the UI both default to the first.
@@ -174,7 +195,7 @@ Citation support is a word-overlap heuristic, so it can catch a misattributed ci
 - **Context Budget** — `RAG_MAX_CONTEXT_CHARS` (default 12000) caps the context sent to the LLM as a cost guardrail. Passages past the budget are dropped, and the last one that fits is cut at the character limit, which can be mid-sentence.
 - **Security Hardening** — Path-traversal guards on `/ingest`, BM25 index stored as plain integer arrays loaded with `allow_pickle=False` (no pickle), 0o600 file permissions on data files, `re.escape()` on pricing pattern matching to prevent ReDoS.
 - **Docker Multi-Stage Build** — `deps → model-cache → runtime` stages; non-root user, with the default embedding and reranker models cached in the image. The image and compose stack have not been run end to end yet; see [known gaps](#known-gaps-to-close-before-production).
-- **Tests and CI** — 280 unit, integration, and stress tests (LLM calls mocked; no API keys needed). GitHub Actions workflows cover CI, the evaluation gate (skipped when the `OPENAI_API_KEY` secret is absent), and GHCR publish on every push to `master`.
+- **Tests and CI** — 446 unit, integration, and stress tests (LLM calls mocked; no API keys needed). GitHub Actions workflows cover CI, the evaluation gate (skipped when the `OPENAI_API_KEY` secret is absent), and GHCR publish on every push to `master`.
 
 ---
 
@@ -248,6 +269,7 @@ uvicorn src.api:app --reload --host 0.0.0.0 --port 8000
 | `GET`  | `/readyz`               | Readiness probe — builds the per-language stores, BM25 indexes, and reranker object, and sends Chroma a heartbeat on every call. Returns 503 when Chroma is unreachable |
 | `GET`  | `/stats`                | Pipeline statistics (model, config, and chunk and cache counts totalled across all languages)          |
 | `GET`  | `/metrics`              | Prometheus scrape endpoint — request count + latency histograms by route, plus `rag_healing_*` metrics |
+| `GET`  | `/chunks/{chunk_id}`    | Full text of a cited passage (`404` once it has left the store)                                        |
 | `POST` | `/upload`               | Save a browser-uploaded **PDF** under `data/uploads` (does not index it; call `/ingest` next)          |
 | `POST` | `/ingest`               | Ingest PDF, TXT, MD, or JSON from a path inside the data directory (blocks until done)                 |
 | `POST` | `/ingest/async`         | Enqueue ingestion as a background job; returns `job_id` immediately (202)                              |
@@ -255,6 +277,24 @@ uvicorn src.api:app --reload --host 0.0.0.0 --port 8000
 | `POST` | `/query`                | Synchronous Q&amp;A — returns answer + citations                                                       |
 | `POST` | `/query/stream`         | **SSE streaming** — streams tokens then citations                                                      |
 
+
+### Accounts and chats
+
+These use the session cookie set by `/auth/register` or `/auth/login`, and also need `Authorization: Bearer <key>` when `RAG_API_KEY` is set. Another user's chat returns `404`.
+
+| Method | Endpoint | Description |
+| ------ | -------- | ----------- |
+| `POST` | `/auth/register` | Create an account and sign in (`403` when `RAG_ALLOW_SIGNUP=false`) |
+| `POST` | `/auth/login` | Sign in (`401` for wrong details, `429` during a lockout) |
+| `POST` | `/auth/logout` | End this session |
+| `GET` | `/auth/me` | The signed-in username |
+| `GET` | `/chats` | Your chats, most recently active first, without messages |
+| `POST` | `/chats` | Create a chat, with an optional `title` |
+| `GET` | `/chats/{chat_id}` | A chat with its messages |
+| `DELETE` | `/chats/{chat_id}` | Delete a chat's history (its documents stay in the store) |
+| `POST` | `/chats/{chat_id}/messages` | Ask a question with the same body as `/query`, and save it with the answer |
+| `POST` | `/chats/{chat_id}/files` | Record documents ingested for this chat |
+| `POST` | `/chats/import` | Copy in a chat saved elsewhere; repeating an `import_id` changes nothing |
 
 ### POST /query
 
@@ -279,7 +319,7 @@ Response:
 }
 ```
 
-`page` is present only for sources that have pages (PDFs).
+`page` is present only for sources that have pages (PDFs). `text_snippet` is a preview of up to 180 characters, taken from the start of the passage and cut at a word boundary. It is not the part the answer relied on. Fetch the whole passage from `GET /chunks/{chunk_id}`.
 
 Add `"self_heal": true` (or set `RAG_SELF_HEALING_ENABLED=true`) to verify and repair
 the answer before it is returned. The response then includes an extra `healing`
@@ -364,6 +404,10 @@ All settings use the `RAG_` prefix and can be set via `.env` or environment vari
 | `RAG_FAITHFULNESS_THRESHOLD`     | `0.7`                                  | Minimum faithfulness score for CI gate                      |
 | `RAG_CORS_ORIGINS`               | `*`                                    | Comma-separated allowed CORS origins                        |
 | `RAG_API_KEY`                    | *(unset)*                              | Bearer token for API auth (disabled when unset)             |
+| `RAG_CHAT_DB_PATH`               | `<RAG_DATA_DIR>/chat.db`               | SQLite file for accounts and chats; use a local disk        |
+| `RAG_ALLOW_SIGNUP`               | `true`                                 | Let anyone who can reach the server register                |
+| `RAG_SESSION_TTL_HOURS`          | `720`                                  | How long a login lasts                                      |
+| `RAG_SESSION_COOKIE_SECURE`      | `false`                                | Force `Secure` cookies; automatic on direct HTTPS requests  |
 | `RAG_LOG_LEVEL`                  | `INFO`                                 | Logging level                                               |
 
 
@@ -622,9 +666,15 @@ The drill uses real API and Chroma server processes on loopback, a local fake LL
 7. **`X-Request-ID` does not reach logs or traces**, so requests cannot yet be correlated across them.
 8. **`MonitoredRAGPipeline.query_stream` (the older synchronous method) does not work with real LLM streaming.** The HTTP service uses `stream_answer` instead.
 
+**Accounts**
+
+- **Documents are shared between accounts.** Any user's questions can retrieve any user's uploaded PDFs, and `/ingest` with `reset: true` still clears the store for everyone.
+- **No self-service password reset.** An operator resets passwords with `scripts/manage_users.py`.
+- **Login throttling is per account, not per IP**, so one client can try one password against many accounts, or keep a known account locked.
+
 **Defaults to change for a real deployment**
 
-9. Auth is off unless `RAG_API_KEY` is set, and CORS defaults to `*`.
+9. Auth is off unless `RAG_API_KEY` is set, CORS defaults to `*`, and anyone who can reach the server can register until `RAG_ALLOW_SIGNUP=false`. Behind a TLS-terminating proxy, also set `RAG_SESSION_COOKIE_SECURE=true`.
 
 ### Not tested at all
 
@@ -720,6 +770,8 @@ python -m pytest tests/test_monitoring.py -v
 production-grade-rag/
 ├── src/
 │   ├── api.py                  # FastAPI app, auth, SSE streaming, middleware, /metrics
+│   ├── chat/
+│   │   └── store.py            # SQLite accounts, login sessions, and chat history
 │   ├── ingestion/
 │   │   ├── loader.py           # PDF, TXT, Markdown, JSON (raw text) loading
 │   │   └── chunker.py          # Recursive / fixed / sentence chunking

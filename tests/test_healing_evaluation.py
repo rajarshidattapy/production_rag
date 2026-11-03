@@ -23,7 +23,15 @@ PLAN = RetrievalPlan(
     queries=["q"], fetch_k=5, final_k=5, use_hybrid=True, use_reranker=False, context_budget=1000
 )
 CTX = [{"id": "c1", "document": "RRF uses a constant k of 60.", "metadata": {"source": "h.txt"}}]
-CIT = [Citation(chunk_id="c1", source="h.txt", filename="h.txt", text_snippet=CTX[0]["document"])]
+CIT = [
+    Citation(
+        chunk_id="c1",
+        source="h.txt",
+        filename="h.txt",
+        text_snippet=CTX[0]["document"],
+        text=CTX[0]["document"],
+    )
+]
 
 
 def _attempt(n: int, passed: bool, ft: FailureType | None = None) -> AttemptRecord:

@@ -644,6 +644,14 @@ class RAGPipeline:
     # Management
     # ------------------------------------------------------------------
 
+    def get_chunk(self, chunk_id: str) -> dict[str, Any] | None:
+        """Find a chunk by ID. An ID doesn't say which language collection holds it."""
+        for lang in sorted(_SUPPORTED_LANGUAGES):
+            found = self._get_vector_store(lang).get_chunks([chunk_id])
+            if found:
+                return found[0]
+        return None
+
     def reset(self) -> None:
         """Clear the vector store and all cached components."""
         # Reset default vector store
