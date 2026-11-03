@@ -34,9 +34,10 @@ class PipelineBackend:
         fetch_k: int,
         alpha: float | None,
         lang: str,
+        where: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         return self.pipeline._retrieve(
-            query, use_hybrid=use_hybrid, k=k, lang=lang, fetch_k=fetch_k, alpha=alpha
+            query, use_hybrid=use_hybrid, k=k, lang=lang, fetch_k=fetch_k, alpha=alpha, where=where
         )
 
     def rerank(

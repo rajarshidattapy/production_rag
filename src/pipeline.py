@@ -21,6 +21,7 @@ from src.generation.generator import Generator
 from src.ingestion.chunker import Chunker
 from src.ingestion.loader import DocumentLoader
 from src.retrieval.vector_store import VectorStore
+from src.utils.page_query import page_filter
 
 logger = logging.getLogger(__name__)
 
@@ -218,10 +219,15 @@ class RAGPipeline:
                     ).format(len_question=len(question), max_len=self.MAX_QUESTION_LENGTH)
                 )
 
-            k = top_k or self.config.top_k_final
+            k, where = self._page_scope(question, top_k)
 
             contexts = self._retrieve(
-                question, use_hybrid=use_hybrid, use_reranker=use_reranker, k=k, lang=lang
+                question,
+                use_hybrid=use_hybrid,
+                use_reranker=use_reranker,
+                k=k,
+                lang=lang,
+                where=where,
             )
 
             if not contexts:
@@ -295,7 +301,7 @@ class RAGPipeline:
                     ).format(len_question=len(question), max_len=self.MAX_QUESTION_LENGTH)
                 )
 
-            k = top_k or self.config.top_k_final
+            k, where = await asyncio.to_thread(self._page_scope, question, top_k)
 
             contexts = await asyncio.to_thread(
                 self._retrieve,
@@ -304,6 +310,7 @@ class RAGPipeline:
                 use_reranker=use_reranker,
                 k=k,
                 lang=lang,
+                where=where,
             )
 
             if not contexts:
@@ -391,12 +398,14 @@ class RAGPipeline:
         token = _setup_translation(lang)
         try:
             question = self._validate_question(question)
+            k, where = self._page_scope(question, top_k)
             result = self._get_healing_engine().run(
                 question,
                 lang=lang,
-                top_k=top_k or self.config.top_k_final,
+                top_k=k,
                 use_hybrid=use_hybrid,
                 use_reranker=use_reranker,
+                where=where,
             )
             if result.abstained:
                 result.answer = _(result.answer)
@@ -445,7 +454,7 @@ class RAGPipeline:
         import asyncio
 
         run = run_blocking or asyncio.to_thread
-        k = top_k or self.config.top_k_final
+        k, where = await run(self._page_scope, question, top_k)
         contexts = await run(
             self._retrieve,
             question,
@@ -453,6 +462,7 @@ class RAGPipeline:
             use_reranker=use_reranker,
             k=k,
             lang=_detect_language(question),
+            where=where,
         )
         if not contexts:
             yield ("contexts", [])
@@ -474,6 +484,59 @@ class RAGPipeline:
 
         yield ("citations", self.citation_formatter.build_citations(contexts))
 
+    def _page_scope(self, question: str, top_k: int | None) -> tuple[int, dict[str, Any] | None]:
+        """Return the chunk count and page filter to retrieve with for ``question``.
+
+        A page question wants the page, not its ``top_k`` best-matching fragments, so it
+        gets at least ``top_k_retrieval`` chunks; the context budget still caps the prompt.
+        Corpora with no page metadata (text files, PDFs ingested before pages were
+        recorded) get plain retrieval, since the reference can't be resolved there and
+        may not even mean a document page.
+        """
+        k = top_k or self.config.top_k_final
+        where = page_filter(question)
+        if where is None or not any(
+            self._get_vector_store(lang).has_paged_chunks() for lang in sorted(_SUPPORTED_LANGUAGES)
+        ):
+            return k, None
+        return max(k, self.config.top_k_retrieval), where
+
+    def _retrieve_pages(
+        self,
+        query: str,
+        where: dict[str, Any],
+        use_hybrid: bool,
+        fetch_k: int,
+        alpha: float | None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve from the requested pages, returning the best ``fetch_k`` in reading order.
+
+        Searches every language collection: chunks are routed by language one at a time, so
+        one page can span collections, and a page question says little about the language
+        of the page it is asking about.
+        """
+        hits: list[dict[str, Any]] = []
+        for lang in sorted(_SUPPORTED_LANGUAGES):
+            if use_hybrid:
+                hits.extend(
+                    self._get_hybrid_retriever(lang).search(
+                        query, k=fetch_k, where=where, alpha=alpha
+                    )
+                )
+            else:
+                hits.extend(
+                    self._get_vector_store(lang).similarity_search(query, k=fetch_k, where=where)
+                )
+        best = sorted(hits, key=lambda hit: hit["score"], reverse=True)[:fetch_k]
+        return sorted(
+            best,
+            key=lambda hit: (
+                str(hit["metadata"].get("source", "")),
+                hit["metadata"].get("page", 0),
+                hit["metadata"].get("chunk_index", 0),
+            ),
+        )
+
     def _retrieve(
         self,
         query: str,
@@ -483,15 +546,20 @@ class RAGPipeline:
         lang: str = "en",
         fetch_k: int | None = None,
         alpha: float | None = None,
+        where: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Retrieve relevant context chunks.
 
         ``fetch_k`` and ``alpha`` are optional overrides used by self-healing
         retries (wider candidate pools, re-balanced hybrid fusion); the
-        defaults reproduce the original behaviour exactly.
+        defaults reproduce the original behaviour exactly. ``where`` restricts
+        retrieval to specific document pages.
         """
         if fetch_k is None:
             fetch_k = self.config.top_k_retrieval if use_reranker else k
+
+        if where is not None:
+            return self._retrieve_pages(query, where, use_hybrid, fetch_k, alpha)
 
         if use_hybrid:
             if alpha is None:

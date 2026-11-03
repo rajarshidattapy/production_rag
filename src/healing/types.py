@@ -105,6 +105,9 @@ class RetrievalPlan(BaseModel):
     alpha: float | None = None
     context_budget: int
     strategy: str = "initial"
+    # Page filter from the original question. It holds across retries because a
+    # rewritten query can't be relied on to keep naming the page.
+    where: dict[str, Any] | None = None
 
 
 class AttemptRecord(BaseModel):

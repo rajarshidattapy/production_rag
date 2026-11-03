@@ -45,6 +45,7 @@ from src.healing.types import (
     VerificationResult,
 )
 from src.healing.verifier import ScoreKind, Verifier
+from src.utils.page_query import strip_page_reference
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,7 @@ class RAGBackend(Protocol):
         fetch_k: int,
         alpha: float | None,
         lang: str,
+        where: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]: ...
 
     def rerank(
@@ -258,6 +260,7 @@ class HealingEngine:
                     fetch_k=plan.fetch_k,
                     alpha=plan.alpha,
                     lang=lang,
+                    where=plan.where,
                 )
                 for q in plan.queries
             ]
@@ -288,6 +291,10 @@ class HealingEngine:
 
     @staticmethod
     def _score_kind(plan: RetrievalPlan) -> ScoreKind:
+        # The page filter chose these passages; similarity to a question like "what's
+        # on page 3?" says nothing about whether they are the right ones.
+        if plan.where is not None:
+            return "none"
         if plan.use_reranker:
             return "rerank"
         if plan.use_hybrid or len(plan.queries) > 1:
@@ -304,12 +311,15 @@ class HealingEngine:
         top_k: int = 5,
         use_hybrid: bool = False,
         use_reranker: bool = False,
+        where: dict[str, Any] | None = None,
     ) -> HealingResult:
         started = time.monotonic()
+        # The word "page" is a location, not a term the passages should contain.
+        analyzed = question if where is None else strip_page_reference(question)
         analysis: QueryAnalysis = self._step(
             "analyze",
             {"question": question},
-            lambda: analyze_query(question),
+            lambda: analyze_query(analyzed),
             lambda a: a.model_dump(),
         )
         plan = self.policy.initial_plan(
@@ -319,6 +329,7 @@ class HealingEngine:
             use_hybrid=use_hybrid,
             use_reranker=use_reranker,
             context_budget=self.context_budget,
+            where=where,
         )
 
         history: list[AttemptRecord] = []
@@ -406,10 +417,14 @@ class HealingEngine:
             if (
                 failure == FailureType.RETRIEVAL_FAILURE
                 and verification.retrieval.num_contexts == 0
-                and self.backend.corpus_is_empty(lang)
             ):
-                # No rewrite can find documents in an empty index.
-                return self._abstain("empty_knowledge_base", history, rewrites, failures, started)
+                # No rewrite can find text on a page that has none, or in an empty index.
+                if plan.where is not None:
+                    return self._abstain("no_text_on_page", history, rewrites, failures, started)
+                if self.backend.corpus_is_empty(lang):
+                    return self._abstain(
+                        "empty_knowledge_base", history, rewrites, failures, started
+                    )
 
             attempt += 1
             feedback = self._feedback(verification)

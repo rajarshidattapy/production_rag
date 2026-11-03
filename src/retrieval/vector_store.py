@@ -197,7 +197,10 @@ class VectorStore:
         for chunk in chunks:
             ids.append(chunk.chunk_id or str(uuid.uuid4()))
             documents.append(chunk.content)
-            metadatas.append({k: str(v) for k, v in chunk.metadata.items()})
+            # Numbers stay numeric so metadata filters can compare them (page >= 3).
+            metadatas.append(
+                {k: v if isinstance(v, int | float) else str(v) for k, v in chunk.metadata.items()}
+            )
 
         batch_size = self._max_batch_size()
 
@@ -242,7 +245,7 @@ class VectorStore:
         self,
         query: str,
         k: int = 5,
-        where: dict[str, str | int | float] | None = None,
+        where: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
         """Retrieve top-k chunks most similar to the query.
 
@@ -299,6 +302,29 @@ class VectorStore:
             for chunk in self._format_get_results(self._collection_call(_get)):
                 found[chunk["id"]] = chunk
         return [found[i] for i in ids if i in found]
+
+    def ids_matching(self, where: dict[str, Any], page_size: int = 5000) -> set[str]:
+        """Return the IDs of every chunk matching a metadata filter."""
+        ids: set[str] = set()
+        offset = 0
+        while True:
+
+            def _get(collection: Any, _o: int = offset):
+                return collection.get(where=where, include=[], limit=page_size, offset=_o)
+
+            page = self._collection_call(_get).get("ids") or []
+            ids.update(page)
+            if len(page) < page_size:
+                return ids
+            offset += len(page)
+
+    def has_paged_chunks(self) -> bool:
+        """Whether any chunk records the page it came from."""
+
+        def _get(collection: Any):
+            return collection.get(where={"page": {"$gte": 1}}, include=[], limit=1)
+
+        return bool(self._collection_call(_get).get("ids"))
 
     # ------------------------------------------------------------------
     # Management

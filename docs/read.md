@@ -4,7 +4,6 @@
 
 ## Not implemented yet, but identified as next production upgrades:
 
-- Page-aware PDF ingestion and page-specific retrieval
 - Shortened citation previews
 - Persistent server-side chat history/users instead of browser `localStorage`
 - CLI-provider mode using Codex, Claude Code, or OpenCode locally
@@ -123,7 +122,6 @@ Learn about:
   - **Source preview** (committed): Collapsible **Sources (N)** cards with a number badge, filename without the hash prefix, score pill, 180-character preview, and click-to-expand.
 - **Advice given but not implemented**
   - **Next scaling steps:** API replicas, a response cache, a GPU or separate reranker, and Qdrant only if Chroma proves to be the bottleneck.
-- **Page-aware PDF ingestion:** It would fix queries like “what's on page 1”.
   - **Formatting and type errors:** `ruff format` still flags `generator.py`, `test_healing_evaluation.py`, and `test_pipeline.py`; `mypy` still reports 59 errors in untouched files, which I left alone.
 
 

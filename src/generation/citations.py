@@ -15,6 +15,7 @@ class Citation:
     filename: str
     text_snippet: str
     score: float = 0.0
+    page: int | None = None
 
 
 class CitationFormatter:
@@ -38,6 +39,7 @@ class CitationFormatter:
                     filename=meta.get("filename", "unknown"),
                     text_snippet=r.get("document", ""),
                     score=score,
+                    page=meta.get("page"),
                 )
             )
         return citations
@@ -65,18 +67,27 @@ class CitationFormatter:
                 result += "\n\n---\n**Sources:**\n"
                 for i, c in enumerate(citations, start=1):
                     snippet = c.text_snippet.replace("\n", " ")[:150]
-                    result += f"{i}. {c.filename} — *{snippet}...*\n"
+                    result += f"{i}. {CitationFormatter._locator(c)} — *{snippet}...*\n"
         elif format == "inline":
             if citations:
                 result += "\n\n**Citations:**\n"
                 for i, c in enumerate(citations, start=1):
-                    result += f"[{i}] {c.filename}\n"
+                    result += f"[{i}] {CitationFormatter._locator(c)}\n"
 
         return result
 
     @staticmethod
+    def _locator(citation: Citation) -> str:
+        if citation.page is None:
+            return citation.filename
+        return f"{citation.filename}, p. {citation.page}"
+
+    @staticmethod
     def to_dict(citations: list[Citation]) -> list[dict[str, Any]]:
-        """Serialize citations to a JSON-compatible dict list."""
+        """Serialize citations to a JSON-compatible dict list.
+
+        ``page`` appears only for sources that have pages.
+        """
         return [
             {
                 "chunk_id": c.chunk_id,
@@ -84,6 +95,7 @@ class CitationFormatter:
                 "filename": c.filename,
                 "text_snippet": c.text_snippet,
                 "score": c.score,
+                **({} if c.page is None else {"page": c.page}),
             }
             for c in citations
         ]

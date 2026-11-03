@@ -17,6 +17,8 @@ class Document:
     content: str
     metadata: dict[str, str | int | float] = field(default_factory=dict)
     doc_id: str = ""
+    # Text of each physical page, in order, for paginated formats. Empty otherwise.
+    pages: list[str] = field(default_factory=list)
 
 
 class DocumentLoader:
@@ -105,10 +107,7 @@ class DocumentLoader:
                 f"exceeds max_pdf_pages limit of {self.max_pdf_pages}"
             )
 
-        pages: list[str] = []
-        for _page_num, page in enumerate(reader.pages, start=1):
-            text = page.extract_text() or ""
-            pages.append(text)
+        pages = [page.extract_text() or "" for page in reader.pages]
 
         content = "\n\n".join(pages)
         return Document(
@@ -120,6 +119,7 @@ class DocumentLoader:
                 "pages": len(reader.pages),
             },
             doc_id=str(file_path),
+            pages=pages,
         )
 
     def iter_docs(self, source: Path | str) -> Iterator[Document]:

@@ -56,6 +56,7 @@ class AdaptiveRetrievalPolicy:
         use_hybrid: bool,
         use_reranker: bool,
         context_budget: int,
+        where: dict[str, Any] | None = None,
     ) -> RetrievalPlan:
         return RetrievalPlan(
             queries=[question],
@@ -66,10 +67,12 @@ class AdaptiveRetrievalPolicy:
             alpha=None,
             context_budget=context_budget,
             strategy="initial",
+            where=where,
         )
 
     def _widen(self, prev: RetrievalPlan) -> tuple[int, int]:
-        final_k = min(self.max_final_k, prev.final_k + self.final_k_step)
+        # Widening never shrinks: a page question or a large top_k can start above the cap.
+        final_k = max(prev.final_k, min(self.max_final_k, prev.final_k + self.final_k_step))
         fetch_k = min(
             self.max_fetch_k,
             max(int(prev.fetch_k * self.fetch_k_multiplier), final_k),
@@ -110,6 +113,7 @@ class AdaptiveRetrievalPolicy:
                 alpha=alpha if use_hybrid else None,
                 context_budget=prev.context_budget,
                 strategy=strategy,
+                where=prev.where,
             )
 
         # Broader: fuse original + all rewrites, bigger budget, balanced alpha.
@@ -123,6 +127,7 @@ class AdaptiveRetrievalPolicy:
             alpha=self.base_alpha if use_hybrid else None,
             context_budget=self._grow_budget(prev.context_budget),
             strategy="multi_query+broad",
+            where=prev.where,
         )
 
     def context_expansion_plan(self, prev: RetrievalPlan) -> RetrievalPlan:

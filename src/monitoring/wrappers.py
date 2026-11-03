@@ -367,6 +367,7 @@ class MonitoredRAGPipeline:
             lang: str = "en",
             fetch_k: int | None = None,
             alpha: float | None = None,
+            where: dict[str, Any] | None = None,
         ):
             start_time = time.monotonic()
             input_data = {
@@ -380,7 +381,7 @@ class MonitoredRAGPipeline:
             # set so wrapped retrievers with the original signature still work.
             overrides = {
                 name: value
-                for name, value in (("fetch_k", fetch_k), ("alpha", alpha))
+                for name, value in (("fetch_k", fetch_k), ("alpha", alpha), ("where", where))
                 if value is not None
             }
             input_data.update(overrides)

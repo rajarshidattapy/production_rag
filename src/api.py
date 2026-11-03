@@ -373,6 +373,7 @@ class CitationResponse(BaseModel):
     filename: str
     text_snippet: str
     score: float
+    page: int | None = None
 
 
 class HealingResponse(BaseModel):
@@ -716,6 +717,7 @@ async def query(request: QueryRequest, response: Response) -> QueryResponse:
                 filename=c["filename"],
                 text_snippet=c["text_snippet"],
                 score=c["score"],
+                page=c.get("page"),
             )
             for c in CitationFormatter.to_dict(citations)
         ]

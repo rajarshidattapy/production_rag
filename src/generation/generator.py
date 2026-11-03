@@ -183,5 +183,6 @@ class Generator:
             doc = ctx.get("document", "")
             meta = ctx.get("metadata", {})
             source = meta.get("source", meta.get("filename", f"Source {i}"))
-            parts.append(f"[{i}] (Source: {source})\n{doc}\n")
+            page = f", page {meta['page']}" if meta.get("page") is not None else ""
+            parts.append(f"[{i}] (Source: {source}{page})\n{doc}\n")
         return "\n".join(parts)

@@ -64,18 +64,34 @@ class Chunker:
             )
 
     def chunk(self, document: Document) -> list[Chunk]:
-        """Split a single document into chunks."""
-        raw_chunks = self._strategies[self.strategy](document.content)
+        """Split a single document into chunks.
+
+        Paginated documents are split one page at a time, so a chunk never mixes pages
+        and its ``page`` metadata is exact. No overlap is carried across a page break.
+        """
+        split = self._strategies[self.strategy]
+        raw_chunks: list[tuple[int | None, str]] = (
+            [(n, text) for n, page in enumerate(document.pages, start=1) for text in split(page)]
+            if document.pages
+            else [(None, text) for text in split(document.content)]
+        )
+        last_page = max((n for n, text in raw_chunks if n and text.strip()), default=None)
         chunks: list[Chunk] = []
 
-        for i, text in enumerate(raw_chunks):
+        for i, (page, text) in enumerate(raw_chunks):
             text = text.strip()
             if not text:
                 continue
 
+            metadata = {**document.metadata, "chunk_index": i, "total_chunks": len(raw_chunks)}
+            if page is not None:
+                metadata["page"] = page
+                # The last page that has text: a blank back cover can't answer anything.
+                metadata["is_last_page"] = page == last_page
+
             chunk = Chunk(
                 content=text,
-                metadata={**document.metadata, "chunk_index": i, "total_chunks": len(raw_chunks)},
+                metadata=metadata,
                 chunk_id=_compute_chunk_id(text, document.doc_id, i),
                 doc_id=document.doc_id,
             )

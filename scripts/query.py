@@ -100,6 +100,7 @@ def main() -> None:
                                     filename=c["filename"],
                                     text_snippet=c["text_snippet"],
                                     score=c["score"],
+                                    page=c.get("page"),
                                 )
                                 for c in res_data["citations"]
                             ]
@@ -151,7 +152,8 @@ def main() -> None:
         print("=" * 60)
         for i, c in enumerate(citations, 1):
             score_info = f" (score: {c.score:.3f})" if c.score else ""
-            print(f"\n[{i}] {c.filename}{score_info}")
+            page_info = f", p. {c.page}" if c.page is not None else ""
+            print(f"\n[{i}] {c.filename}{page_info}{score_info}")
             print(f"    Source: {c.source}")
             print(f"    Snippet: {c.text_snippet[:120]}...")
 

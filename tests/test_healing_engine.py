@@ -54,9 +54,16 @@ class FakeBackend:
         self.rerank_calls: list[str] = []
         self.generate_calls: list[dict[str, Any]] = []
 
-    def retrieve(self, query, *, use_hybrid, k, fetch_k, alpha, lang):
+    def retrieve(self, query, *, use_hybrid, k, fetch_k, alpha, lang, where=None):
         self.retrieve_calls.append(
-            {"query": query, "use_hybrid": use_hybrid, "k": k, "fetch_k": fetch_k, "alpha": alpha}
+            {
+                "query": query,
+                "use_hybrid": use_hybrid,
+                "k": k,
+                "fetch_k": fetch_k,
+                "alpha": alpha,
+                "where": where,
+            }
         )
         return [dict(c) for c in self.retrieval.get(query, self.default_ctx)]
 

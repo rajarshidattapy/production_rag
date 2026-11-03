@@ -77,6 +77,24 @@ Hybrid search, reranking, and self-healing are three independent switches, all o
 
 JSON files are loaded as raw text, not parsed into fields. To index a TXT, MD, or JSON file you must use one of the path-based entry points.
 
+### Page-aware PDFs
+
+PDFs are chunked one page at a time, and each chunk records its `page` (the physical position in the file, starting at 1, not the label printed on the page). A question that names pages is then answered from those pages only:
+
+| The question says | Retrieved from |
+| ----------------- | -------------- |
+| `page 5`, `p. 5`, `first page`, `3rd page`, `page one` | That page |
+| `pages 3-5`, `pages 3 to 5`, `first 3 pages` | That range |
+| `pages 2, 4 and 6`, `page 1 and page 3` | Those pages |
+| `last page` | The last page with text, in each PDF |
+| `Seite 5`, `erste Seite`, `página 5`, `última página` | The same references in German and Spanish |
+
+- **Filter, not ranking:** The filter applies to vector and BM25 search, across every language collection, and holds through self-healing retries. A page with no extractable text returns "could not find" (or abstains with reason `no_text_on_page`) rather than answering from other pages.
+- **Whole page:** These questions retrieve at least `RAG_TOP_K_RETRIEVAL` chunks, even if `top_k` is lower, so the answer sees the whole page. Chunks arrive in reading order unless the reranker is on. `RAG_MAX_CONTEXT_CHARS` still caps the prompt.
+- **Every PDF:** "Page 1" matches page 1 of every PDF in the store. Citations name the file and page, but a question can't yet pick one document.
+- **Page breaks:** Chunks don't cross pages, so a sentence split by a page break is split in the index too.
+- **No page metadata:** If nothing in the store has page metadata, page references are ignored and retrieval works as usual. PDFs indexed before this feature need re-ingesting, with `reset` so the old chunks are removed.
+
 ### Retrieval modes
 
 `use_hybrid` and `use_reranker` are independent request fields, so there are four modes. The API and the UI both default to the first.
@@ -256,10 +274,12 @@ Response:
   "answer": "Hybrid search combines...",
   "citations": [
     {"chunk_id": "abc123", "source": "doc.pdf", "filename": "doc.pdf",
-     "text_snippet": "...", "score": 0.842}
+     "text_snippet": "...", "score": 0.842, "page": 3}
   ]
 }
 ```
+
+`page` is present only for sources that have pages (PDFs).
 
 Add `"self_heal": true` (or set `RAG_SELF_HEALING_ENABLED=true`) to verify and repair
 the answer before it is returned. The response then includes an extra `healing`
@@ -735,7 +755,8 @@ production-grade-rag/
 │   ├── pipeline.py             # RAGPipeline orchestration + async support
 │   ├── config.py               # RAGSettings (RAG_* env vars, pydantic-settings)
 │   └── utils/
-│       └── i18n.py             # gettext internationalization helpers
+│       ├── i18n.py             # gettext internationalization helpers
+│       └── page_query.py       # Page references in questions → metadata filters
 ├── index.html                  # Browser UI and Observability dashboard
 ├── tests/                      # 280 pytest tests
 ├── scripts/

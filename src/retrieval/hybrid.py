@@ -440,7 +440,7 @@ class HybridRetriever:
         self,
         query: str,
         k: int = 10,
-        where: dict[str, str | int | float] | None = None,
+        where: dict[str, Any] | None = None,
         alpha: float | None = None,
     ) -> list[dict[str, Any]]:
         """Perform hybrid search: BM25 + vector, fused with RRF.
@@ -448,7 +448,7 @@ class HybridRetriever:
         Args:
             query: The search query string.
             k: Number of final results.
-            where: Optional metadata filter for vector search.
+            where: Optional metadata filter, applied to both BM25 and vector search.
             alpha: Per-call override of the vector/BM25 weight. The retriever is
                 shared across requests, so callers that need a different balance
                 (e.g. self-healing retries) pass it here instead of mutating
@@ -463,7 +463,7 @@ class HybridRetriever:
             raise ValueError(f"alpha must be in [0, 1], got {alpha}")
 
         # --- BM25 scores ---
-        bm25_results = self._bm25_search(query, k)
+        bm25_results = self._bm25_search(query, k, where)
         bm25_rank = {r["id"]: i for i, r in enumerate(bm25_results)}
 
         # --- Vector scores ---
@@ -502,9 +502,12 @@ class HybridRetriever:
 
         return results
 
-    def _bm25_search(self, query: str, k: int) -> list[dict[str, Any]]:
-        """Run BM25 keyword search."""
+    def _bm25_search(
+        self, query: str, k: int, where: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """Run BM25 keyword search, optionally over only the chunks matching ``where``."""
         current_count = self.vector_store.count()
+        allowed = self.vector_store.ids_matching(where) if where else None
 
         with self._index_lock:
             # Load from disk if current state is memory-cold but not stale
@@ -531,6 +534,10 @@ class HybridRetriever:
 
             scores = self._bm25.get_scores(self._tokenize(query))
             n = len(scores)
+            if allowed is not None:
+                # The index holds no metadata, so filtered-out chunks are simply scored as misses.
+                keep = np.fromiter((i in allowed for i in self._corpus_ids), dtype=bool, count=n)
+                scores[~keep] = 0.0
             if n > 8 * k:
                 # Avoid sorting the whole corpus: keep everything scoring at least the k-th best
                 # (or every positive score if fewer than k match), then order those.
