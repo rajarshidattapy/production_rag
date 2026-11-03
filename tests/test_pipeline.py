@@ -291,7 +291,9 @@ class TestRAGPipeline:
             assert res == "Async Success."
             mock_openai.chat.completions.create.assert_called_once()
 
-    def test_openrouter_model_uses_openrouter_endpoint(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_openrouter_model_uses_openrouter_endpoint(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """A provider-qualified model uses OpenRouter with OPENAI_API_KEY."""
         from src.generation.llm_client import OPENROUTER_BASE_URL, LLMClient
 

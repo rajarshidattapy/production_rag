@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextvars
 import gettext
 import logging
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -427,6 +428,52 @@ class RAGPipeline:
             use_reranker=use_reranker,
         )
 
+    async def stream_answer(
+        self,
+        question: str,
+        top_k: int | None = None,
+        use_hybrid: bool = False,
+        use_reranker: bool = False,
+        run_blocking: Callable[..., Awaitable[Any]] | None = None,
+    ) -> AsyncGenerator[tuple[str, Any], None]:
+        """Answer without self-healing, yielding ``(kind, value)`` events as they happen.
+
+        Events are ``("contexts", passages)``, then ``("token", text)`` for each generated
+        chunk, then ``("citations", citations)``. ``run_blocking`` runs the blocking
+        retrieval and reranking steps; it defaults to ``asyncio.to_thread``.
+        """
+        import asyncio
+
+        run = run_blocking or asyncio.to_thread
+        k = top_k or self.config.top_k_final
+        contexts = await run(
+            self._retrieve,
+            question,
+            use_hybrid=use_hybrid,
+            use_reranker=use_reranker,
+            k=k,
+            lang=_detect_language(question),
+        )
+        if not contexts:
+            yield ("contexts", [])
+            yield (
+                "token",
+                "I could not find any relevant information in the knowledge "
+                "base to answer your question.",
+            )
+            yield ("citations", [])
+            return
+
+        if use_reranker:
+            contexts = await run(self._apply_reranker, question, contexts, top_k=k)
+        contexts = self._apply_context_budget(contexts)
+        yield ("contexts", contexts)
+
+        async for chunk in self.generator.generate_stream(question, contexts):
+            yield ("token", chunk)
+
+        yield ("citations", self.citation_formatter.build_citations(contexts))
+
     def _retrieve(
         self,
         query: str,
@@ -545,15 +592,16 @@ class RAGPipeline:
         logger.info("Pipeline reset: vector store cleared")
 
     def stats(self) -> dict[str, Any]:
-        """Return pipeline statistics (defaulting to English for backward compatibility)."""
-        cache_stats = self.vector_store.embedding_cache_stats()
+        """Return pipeline statistics, totalled across every language collection."""
+        stores = [self._get_vector_store(lang) for lang in sorted(_SUPPORTED_LANGUAGES)]
+        cache_stats = [store.embedding_cache_stats() for store in stores]
         return {
-            "chunks_in_store": self.vector_store.count(),
+            "chunks_in_store": sum(store.count() for store in stores),
             "embedding_model": self.config.embedding_model,
             "llm_provider": self.config.llm_provider,
             "llm_model": self.config.llm_model,
             "chunk_size": self.config.chunk_size,
             "chunk_overlap": self.config.chunk_overlap,
-            "embedding_cache_hits": cache_stats["hits"],
-            "embedding_cache_misses": cache_stats["misses"],
+            "embedding_cache_hits": sum(c["hits"] for c in cache_stats),
+            "embedding_cache_misses": sum(c["misses"] for c in cache_stats),
         }

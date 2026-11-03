@@ -28,7 +28,9 @@ CIT = [Citation(chunk_id="c1", source="h.txt", filename="h.txt", text_snippet=CT
 
 def _attempt(n: int, passed: bool, ft: FailureType | None = None) -> AttemptRecord:
     return AttemptRecord(
-        attempt=n, action="initial", plan=PLAN,
+        attempt=n,
+        action="initial",
+        plan=PLAN,
         verification=VerificationResult(passed=passed, failure_type=ft),
     )
 
@@ -38,8 +40,12 @@ def _recovered() -> HealingResult:
         answer="RRF uses a constant k of 60 [1].",
         citations=CIT,
         contexts=CTX,
-        info=HealingInfo(status="recovered", attempts=2, recovered=True,
-                         failure_types=[FailureType.QUERY_FAILURE]),
+        info=HealingInfo(
+            status="recovered",
+            attempts=2,
+            recovered=True,
+            failure_types=[FailureType.QUERY_FAILURE],
+        ),
         history=[_attempt(1, False, FailureType.QUERY_FAILURE), _attempt(2, True)],
     )
 
@@ -47,19 +53,27 @@ def _recovered() -> HealingResult:
 def _abstained() -> HealingResult:
     return HealingResult(
         answer="Unable to answer reliably from the available context.",
-        info=HealingInfo(status="abstained", attempts=3, recovered=False,
-                         reason="insufficient_verified_context"),
+        info=HealingInfo(
+            status="abstained", attempts=3, recovered=False, reason="insufficient_verified_context"
+        ),
         history=[_attempt(i, False, FailureType.RETRIEVAL_FAILURE) for i in (1, 2, 3)],
     )
 
 
 def _dataset(tmp_path: Path) -> GoldenDataset:
     ds = GoldenDataset(tmp_path / "h.jsonl")
-    ds.save([
-        EvalExample(question="RRF k?", reference_answer="60", id="a", category="terse"),
-        EvalExample(question="Who invented BM25?", reference_answer="n/a", id="b",
-                    expected_behavior="abstain", category="unanswerable"),
-    ])
+    ds.save(
+        [
+            EvalExample(question="RRF k?", reference_answer="60", id="a", category="terse"),
+            EvalExample(
+                question="Who invented BM25?",
+                reference_answer="n/a",
+                id="b",
+                expected_behavior="abstain",
+                category="unanswerable",
+            ),
+        ]
+    )
     return GoldenDataset(tmp_path / "h.jsonl")
 
 
@@ -132,7 +146,12 @@ def test_runner_passes_self_heal_only_when_set(tmp_path: Path) -> None:
     pipeline.query.return_value = ("a", [])
     runner = EvaluationRunner(pipeline=pipeline, dataset=_dataset(tmp_path), results_dir=tmp_path)
     ex = runner.dataset.examples[0]
-    for scorer in ("scorer", "relevance_scorer", "context_precision_scorer", "context_recall_scorer"):
+    for scorer in (
+        "scorer",
+        "relevance_scorer",
+        "context_precision_scorer",
+        "context_recall_scorer",
+    ):
         setattr(runner, scorer, MagicMock(score=MagicMock(return_value={})))
 
     runner._evaluate_single(ex, False, False)

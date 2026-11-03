@@ -29,6 +29,11 @@ uvicorn[standard]>=0.54.0            # ASGI server
 langdetect>=1.0.9                    # Language detection for routing
 prometheus-client>=0.26.0            # /metrics scrape endpoint
 
+# Observability (used only when MONITOR_ENABLED=true)
+langfuse>=2.60,<3                    # src/monitoring/tracing.py uses the v2 trace()/span() API
+opentelemetry-sdk>=1.30
+opentelemetry-exporter-otlp-proto-http>=1.30
+
 pytest>=9.1.1
 pytest-cov>=7.1.0
 pytest-asyncio>=1.4.0

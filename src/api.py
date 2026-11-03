@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import secrets
+import threading
 import time
 import uuid
 from collections import OrderedDict
@@ -39,6 +40,7 @@ from src.config import settings as _settings
 from src.generation.citations import CitationFormatter
 from src.healing.metrics import HEALING_REGISTRY
 from src.pipeline import RAGPipeline
+from src.retrieval.vector_store import VectorStoreUnavailableError
 from src.utils.i18n import _
 
 logger = logging.getLogger(__name__)
@@ -185,6 +187,16 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(VectorStoreUnavailableError)
+async def vector_store_unavailable_handler(request: Request, exc: VectorStoreUnavailableError):
+    logger.warning("Vector store unavailable: %s", exc)
+    return Response(
+        status_code=503,
+        content='{"detail": "The vector database is unavailable."}',
+        media_type="application/json",
+    )
+
+
 # --- OpenAI Exception Handlers ---
 try:
     import openai
@@ -253,15 +265,38 @@ except ImportError:
 
 # Module-level singleton, constructed lazily on first use so that /healthz
 # does not force-load the embedding model or Chroma client.
-_pipeline: RAGPipeline | None = None
+_pipeline: Any = None
 
 
-def get_pipeline() -> RAGPipeline:
-    """Return the shared RAGPipeline instance, constructing it on first use."""
+def _build_pipeline() -> Any:
+    """Build the pipeline, instrumented with OTel and Langfuse when MONITOR_ENABLED=true."""
+    pipeline = RAGPipeline()
+
+    from src.monitoring.config import settings as monitoring_settings
+
+    if not monitoring_settings.enabled:
+        return pipeline
+
+    # Imported only when enabled: src.monitoring.wrappers patches the LLM clients on import.
+    from src.monitoring import MetricsCollector, MonitoredRAGPipeline, Tracer
+
+    logger.info("Monitoring enabled: wrapping the pipeline with MonitoredRAGPipeline")
+    return MonitoredRAGPipeline(
+        pipeline, tracer=Tracer(enabled=True), metrics=MetricsCollector(enabled=True)
+    )
+
+
+def get_pipeline() -> Any:
+    """Return the shared pipeline instance, constructing it on first use."""
     global _pipeline
     if _pipeline is None:
-        _pipeline = RAGPipeline()
+        _pipeline = _build_pipeline()
     return _pipeline
+
+
+def _query_timeout() -> float | None:
+    timeout = _settings.query_timeout_seconds
+    return timeout if timeout > 0 else None
 
 
 def reset_pipeline() -> None:
@@ -391,7 +426,8 @@ def readyz() -> HealthResponse:
         # 2. Warm up components for all supported languages
         pipeline = get_pipeline()
         for lang in ["en", "de", "es"]:
-            _ = pipeline._get_vector_store(lang)
+            # Objects built by an earlier call are cached, so ask the database directly.
+            pipeline._get_vector_store(lang).heartbeat()
             _ = pipeline._get_hybrid_retriever(lang)
         _ = pipeline._get_reranker()
 
@@ -521,13 +557,50 @@ async def ingest(request: IngestRequest) -> IngestResponse:
 _INGEST_JOBS_MAX = 500
 _ingest_jobs: OrderedDict[str, dict[str, Any]] = OrderedDict()
 _background_ingest_tasks: set[asyncio.Task[None]] = set()
+# Identifies this process, so a job left unfinished by a previous one can be recognised.
+_INSTANCE_ID = uuid.uuid4().hex
+_ingest_jobs_file_lock = threading.Lock()
+
+
+def _ingest_jobs_path() -> Path:
+    return Path(_settings.data_dir) / "ingest_jobs.json"
+
+
+def _read_persisted_ingest_jobs() -> dict[str, dict[str, Any]]:
+    try:
+        with open(_ingest_jobs_path(), encoding="utf-8") as f:
+            jobs = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return jobs if isinstance(jobs, dict) else {}
+
+
+def _persist_ingest_job(job_id: str, record: dict[str, Any]) -> None:
+    """Save job status so it survives a restart. Best effort: never fails the job itself."""
+    path = _ingest_jobs_path()
+    tmp = path.with_name(f"{path.name}.{_INSTANCE_ID}.tmp")
+    try:
+        with _ingest_jobs_file_lock:
+            jobs = _read_persisted_ingest_jobs()
+            jobs.pop(job_id, None)
+            jobs[job_id] = record
+            for old_id in list(jobs)[: max(0, len(jobs) - _INGEST_JOBS_MAX)]:
+                del jobs[old_id]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(jobs, f)
+            os.replace(tmp, path)
+    except OSError as exc:
+        logger.warning("Could not save ingest job status: %s", exc)
 
 
 def _record_ingest_job(job_id: str, **fields: Any) -> None:
-    _ingest_jobs[job_id] = {**_ingest_jobs.get(job_id, {}), **fields}
+    _ingest_jobs[job_id] = {**_ingest_jobs.get(job_id, {}), **fields, "owner": _INSTANCE_ID}
     _ingest_jobs.move_to_end(job_id)
     while len(_ingest_jobs) > _INGEST_JOBS_MAX:
         _ingest_jobs.popitem(last=False)
+    _persist_ingest_job(job_id, _ingest_jobs[job_id])
 
 
 async def _run_ingest_job(job_id: str, source_path: Path, reset: bool) -> None:
@@ -572,10 +645,16 @@ async def ingest_async(request: IngestRequest) -> IngestJobResponse:
 @app.get("/ingest/jobs/{job_id}", response_model=IngestJobStatusResponse, dependencies=[_auth])
 def get_ingest_job(job_id: str) -> IngestJobStatusResponse:
     """Return the current status of an async ingestion job."""
-    job = _ingest_jobs.get(job_id)
+    job = _ingest_jobs.get(job_id) or _read_persisted_ingest_jobs().get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="No ingest job found with that ID.")
-    return IngestJobStatusResponse(job_id=job_id, **job)
+    if job.get("status") in ("pending", "running") and job.get("owner") != _INSTANCE_ID:
+        job = {
+            **job,
+            "status": "interrupted",
+            "error": "The server restarted before this job finished.",
+        }
+    return IngestJobStatusResponse(job_id=job_id, **{k: v for k, v in job.items() if k != "owner"})
 
 
 @app.post(
@@ -602,25 +681,33 @@ async def query(request: QueryRequest, response: Response) -> QueryResponse:
 
         try:
             if _healing_requested(request):
-                result = await pipeline.query_with_healing_async(
-                    request.question,
-                    top_k=request.top_k,
-                    use_hybrid=request.use_hybrid,
-                    use_reranker=request.use_reranker,
+                result = await asyncio.wait_for(
+                    pipeline.query_with_healing_async(
+                        request.question,
+                        top_k=request.top_k,
+                        use_hybrid=request.use_hybrid,
+                        use_reranker=request.use_reranker,
+                    ),
+                    _query_timeout(),
                 )
                 answer, citations = result.answer, result.citations
                 healing = HealingResponse(**_healing_payload(result.info))
                 response.headers["X-RAG-Healing-Status"] = result.info.status
                 response.headers["X-RAG-Healing-Attempts"] = str(result.info.attempts)
             else:
-                answer, citations = await pipeline.query_async(
-                    request.question,
-                    top_k=request.top_k,
-                    use_hybrid=request.use_hybrid,
-                    use_reranker=request.use_reranker,
+                answer, citations = await asyncio.wait_for(
+                    pipeline.query_async(
+                        request.question,
+                        top_k=request.top_k,
+                        use_hybrid=request.use_hybrid,
+                        use_reranker=request.use_reranker,
+                    ),
+                    _query_timeout(),
                 )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except TimeoutError as exc:
+            raise HTTPException(status_code=504, detail="The query timed out.") from exc
 
         citation_responses = [
             CitationResponse(
@@ -654,6 +741,13 @@ async def query(request: QueryRequest, response: Response) -> QueryResponse:
 _SSE_CHUNK_RE = re.compile(r"\S+\s*|\s+")
 
 
+async def _next_event(events: AsyncGenerator[tuple[str, Any], None]) -> tuple[str, Any] | None:
+    try:
+        return await anext(events)
+    except StopAsyncIteration:
+        return None
+
+
 @app.post("/query/stream", dependencies=[_auth])
 async def query_stream(request: QueryRequest) -> StreamingResponse:
     """Answer a question and stream tokens via Server-Sent Events (SSE).
@@ -678,8 +772,10 @@ async def query_stream(request: QueryRequest) -> StreamingResponse:
              -d '{"question": "What is RAG?", "use_hybrid": true}'
     """
     pipeline = get_pipeline()
+    timeout = _query_timeout()
 
     async def _event_stream() -> AsyncGenerator[str, None]:
+        deadline = None if timeout is None else time.monotonic() + timeout
         try:
             question = request.question.strip()
             if not question:
@@ -693,11 +789,14 @@ async def query_stream(request: QueryRequest) -> StreamingResponse:
                 return
 
             if _healing_requested(request):
-                result = await pipeline.query_with_healing_async(
-                    question,
-                    top_k=request.top_k,
-                    use_hybrid=request.use_hybrid,
-                    use_reranker=request.use_reranker,
+                result = await asyncio.wait_for(
+                    pipeline.query_with_healing_async(
+                        question,
+                        top_k=request.top_k,
+                        use_hybrid=request.use_hybrid,
+                        use_reranker=request.use_reranker,
+                    ),
+                    timeout,
                 )
                 for piece in _SSE_CHUNK_RE.findall(result.answer):
                     yield f"data: {json.dumps({'token': piece})}\n\n"
@@ -706,45 +805,31 @@ async def query_stream(request: QueryRequest) -> StreamingResponse:
                 yield f"data: {json.dumps({'citations': citation_dicts})}\n\n"
                 return
 
-            k = request.top_k or _settings.top_k_final
-
-            # Retrieval runs in a thread (blocking I/O to ChromaDB / BM25)
-            contexts = await asyncio.to_thread(
-                pipeline._retrieve,
+            events = pipeline.stream_answer(
                 question,
+                top_k=request.top_k,
                 use_hybrid=request.use_hybrid,
                 use_reranker=request.use_reranker,
-                k=k,
             )
-
-            if not contexts:
-                no_context_msg = (
-                    "I could not find any relevant information in the knowledge "
-                    "base to answer your question."
-                )
-                yield f"data: {json.dumps({'token': no_context_msg})}\n\n"
-                yield f"data: {json.dumps({'citations': []})}\n\n"
-                yield "data: [DONE]\n\n"
-                return
-
-            if request.use_reranker:
-                contexts = await asyncio.to_thread(
-                    pipeline._apply_reranker, question, contexts, top_k=k
-                )
-
-            contexts = pipeline._apply_context_budget(contexts)
-
-            # Stream LLM tokens
-            async for chunk in pipeline.generator.generate_stream(question, contexts):
-                yield f"data: {json.dumps({'token': chunk})}\n\n"
-
-            # Emit citations as final structured event
-            citations = pipeline.citation_formatter.build_citations(contexts)
-            citation_dicts = CitationFormatter.to_dict(citations)
-            yield f"data: {json.dumps({'citations': citation_dicts})}\n\n"
+            while True:
+                remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+                event = await asyncio.wait_for(_next_event(events), remaining)
+                if event is None:
+                    break
+                kind, value = event
+                if kind == "token":
+                    yield f"data: {json.dumps({'token': value})}\n\n"
+                elif kind == "citations":
+                    # Emit citations as final structured event
+                    citation_dicts = CitationFormatter.to_dict(value)
+                    yield f"data: {json.dumps({'citations': citation_dicts})}\n\n"
 
         except ValueError as exc:
             yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+        except TimeoutError:
+            yield f"data: {json.dumps({'error': 'The query timed out.'})}\n\n"
+        except VectorStoreUnavailableError:
+            yield f"data: {json.dumps({'error': 'The vector database is unavailable.'})}\n\n"
         except Exception as exc:
             yield f"data: {json.dumps({'error': 'Internal server error during streaming.'})}\n\n"
             raise exc

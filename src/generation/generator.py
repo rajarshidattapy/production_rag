@@ -136,9 +136,7 @@ class Generator:
         except ImportError:
             raise ImportError("openai package required. Install with: pip install openai") from None
 
-        client = AsyncOpenAI(
-            timeout=self._client.timeout, **self._client.openai_client_kwargs()
-        )
+        client = AsyncOpenAI(timeout=self._client.timeout, **self._client.openai_client_kwargs())
         messages: list[Any] = [
             {"role": "system", "content": system},
             {"role": "user", "content": prompt},
@@ -167,7 +165,6 @@ class Generator:
         async with client.messages.stream(
             model=self.model,
             max_tokens=self.max_tokens,
-            temperature=self.temperature,
             system=system,
             messages=[{"role": "user", "content": prompt}],
         ) as stream:

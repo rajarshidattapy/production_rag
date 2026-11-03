@@ -41,6 +41,7 @@ LOAD_REQUESTS = 300
 LOAD_CONCURRENCY = 20
 FAKE_LLM_DELAY_S = 0.05
 HANG_CLIENT_TIMEOUT_S = 30.0
+QUERY_DEADLINE_S = 20  # longer than the retry budget on an outage, or 504 masks the 503
 
 
 def free_port() -> int:
@@ -134,23 +135,66 @@ class FakeLLM:
         self.server.server_close()
 
 
+class FakeOTLP:
+    """Counts OTLP metric exports and Langfuse ingestion calls instead of storing them."""
+
+    def __init__(self) -> None:
+        self.otlp = 0
+        self.langfuse = 0
+        fake = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args: object) -> None:
+                pass
+
+            def do_POST(self) -> None:
+                self.rfile.read(int(self.headers.get("content-length", 0)))
+                if self.path.startswith("/v1/metrics"):
+                    fake.otlp += 1
+                elif self.path.startswith("/api/public"):
+                    fake.langfuse += 1
+                self.send_response(207 if self.path.startswith("/api/public") else 200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+        self.port = free_port()
+        self.server = ThreadingHTTPServer(("127.0.0.1", self.port), Handler)
+        self.server.daemon_threads = True
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def stop(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
 # ---------------------------------------------------------------------------
 # API process (--serve-api), with the embedding model stubbed out
 # ---------------------------------------------------------------------------
 
 
+def assert_llm_stays_local() -> None:
+    """Exit unless every LLM call would land on the local fake provider.
+
+    A developer's settings, such as RAG_OPENROUTER_MODE in .env, must never be able to send
+    drill traffic to a real provider. An earlier version of this drill did exactly that.
+    """
+    sys.path.insert(0, str(ROOT))
+    from src.generation.llm_client import LLMClient
+
+    base_url = LLMClient("openai", "gpt-4o-mini").openai_client_kwargs().get("base_url")
+    env_url = os.environ.get("OPENAI_BASE_URL", "")
+    if base_url or not env_url.startswith("http://127.0.0.1:"):
+        raise SystemExit(f"Refusing to start: LLM calls would go to {base_url or env_url!r}.")
+
+
 def serve_api(port: int) -> None:
+    assert_llm_stays_local()
     sys.path.insert(0, str(ROOT))
     import uvicorn
 
-    from src.generation.llm_client import LLMClient
     from src.retrieval import vector_store
-
-    # Refuse to run unless every LLM call would land on the local fake provider. Settings
-    # such as RAG_OPENROUTER_MODE in a developer's .env can otherwise redirect them.
-    fixed_url = LLMClient("openai", "gpt-4o-mini").openai_client_kwargs().get("base_url")
-    if fixed_url or not os.environ.get("OPENAI_BASE_URL", "").startswith("http://127.0.0.1:"):
-        raise SystemExit(f"Refusing to start: LLM would not use the local fake ({fixed_url}).")
 
     def encode(self, texts: list[str]) -> list[list[float]]:
         out = []
@@ -200,7 +244,7 @@ class Harness:
                 "--port",
                 str(self.chroma_port),
             ],
-            None,
+            {**os.environ, "ANONYMIZED_TELEMETRY": "False"},
             self.tmp / "chroma.log",
             self.tmp,
         )
@@ -209,6 +253,9 @@ class Harness:
         env = dict(os.environ)
         env.update(
             RAG_OPENROUTER_MODE="false",
+            RAG_QUERY_TIMEOUT_SECONDS=str(QUERY_DEADLINE_S),
+            ANONYMIZED_TELEMETRY="False",
+            NO_PROXY="127.0.0.1",
             RAG_DATA_DIR=str(data_dir),
             RAG_CHROMA_PATH=str(data_dir / "chroma_db"),
             RAG_CHROMA_HOST="127.0.0.1",
@@ -224,10 +271,12 @@ class Harness:
         )
         return env
 
-    def start_api(self, port: int, data_dir: Path) -> subprocess.Popen:
+    def start_api(
+        self, port: int, data_dir: Path, extra_env: dict[str, str] | None = None
+    ) -> subprocess.Popen:
         return spawn(
             [sys.executable, str(Path(__file__).resolve()), "--serve-api", str(port)],
-            self.api_env(data_dir),
+            {**self.api_env(data_dir), **(extra_env or {})},
             self.tmp / f"api_{port}.log",
             self.tmp,  # not the repo root, so a developer's .env is never read
         )
@@ -303,6 +352,19 @@ def run(out: str | None) -> None:
         return client.post(f"{base}/query", json=body, timeout=timeout)
 
     try:
+        # ---- API starts while the database is down --------------------------------
+        api_a = h.start_api(port_a, data_a)
+        wait_healthy(client, a)
+        status, secs, _ = timed(lambda: ask(a, timeout=60))
+        h.check(
+            "Chroma down at startup",
+            "POST /query before Chroma has ever been reachable",
+            "503: a server-side outage, not bad input",
+            f"{status} in {secs:.1f}s",
+            status == 503,
+        )
+        kill_tree(api_a)
+
         # ---- Startup and the happy path -----------------------------------------
         h.start_chroma()
         wait_chroma(client, h.chroma_port)
@@ -375,10 +437,10 @@ def run(out: str | None) -> None:
         status, secs, _ = timed(lambda: ask(a, timeout=HANG_CLIENT_TIMEOUT_S))
         h.check(
             "LLM failure",
-            f"Provider hangs (client waits {HANG_CLIENT_TIMEOUT_S:.0f}s)",
-            f"an error within {HANG_CLIENT_TIMEOUT_S:.0f}s",
+            f"Provider hangs (RAG_QUERY_TIMEOUT_SECONDS={QUERY_DEADLINE_S})",
+            f"504 at the {QUERY_DEADLINE_S}s deadline",
             f"{status} after {secs:.1f}s",
-            isinstance(status, int) and status >= 500,
+            status == 504 and secs < QUERY_DEADLINE_S + 3,
         )
         llm.release.set()
         llm.mode = "ok"
@@ -413,9 +475,9 @@ def run(out: str | None) -> None:
         h.check(
             "Chroma outage",
             "POST /query",
-            "clean 5xx in a few seconds",
+            "503 in a few seconds",
             f"{status} in {secs:.1f}s",
-            isinstance(status, int) and 500 <= status < 600 and secs < 30,
+            status == 503 and secs < 30,
         )
         h.start_chroma()
         start = time.perf_counter()
@@ -511,6 +573,51 @@ def run(out: str | None) -> None:
             f"A reset: {status}; B /query: {status_b}",
             status_b == 200,
         )
+
+        # ---- MONITOR_ENABLED=true actually reaches the HTTP service --------------------
+        kill_tree(api_b)
+        otlp = FakeOTLP()
+        try:
+            api_b = h.start_api(
+                port_b,
+                data_b,
+                {
+                    "MONITOR_ENABLED": "true",
+                    "MONITOR_OTEL_EXPORTER_OTLP_ENDPOINT": f"http://127.0.0.1:{otlp.port}",
+                    "MONITOR_OTEL_EXPORT_INTERVAL_MS": "1000",
+                    "MONITOR_LANGFUSE_SECRET_KEY": "sk-lf-drill",
+                    "MONITOR_LANGFUSE_PUBLIC_KEY": "pk-lf-drill",
+                    "MONITOR_LANGFUSE_HOST": f"http://127.0.0.1:{otlp.port}",
+                },
+            )
+            wait_healthy(client, b)
+            status, _, _ = timed(lambda: ask(b))
+            stream = client.post(f"{b}/query/stream", json={"question": QUESTION}, timeout=60)
+            streamed = "citations" in stream.text
+            time.sleep(8)  # both exporters flush on a timer
+            h.check(
+                "Monitoring",
+                "MONITOR_ENABLED=true: /query and /query/stream work",
+                "200, with citations in the stream",
+                f"{status}; stream citations: {streamed}",
+                status == 200 and streamed,
+            )
+            h.check(
+                "Monitoring",
+                "OTLP metrics reach the configured collector",
+                "more than 0 exports",
+                str(otlp.otlp),
+                otlp.otlp > 0,
+            )
+            h.check(
+                "Monitoring",
+                "Langfuse traces reach the configured host",
+                "more than 0 ingestion calls",
+                str(otlp.langfuse),
+                otlp.langfuse > 0,
+            )
+        finally:
+            otlp.stop()
     finally:
         client.close()
         for proc in (api_a, api_b, h.chroma):

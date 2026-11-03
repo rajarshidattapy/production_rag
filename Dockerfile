@@ -22,8 +22,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY --from=deps /install/pkg /usr/local
 
 COPY scripts/cache_models.py ./scripts/cache_models.py
-COPY src ./src
-COPY setup.py ./
 
 RUN python scripts/cache_models.py
 
@@ -45,7 +43,7 @@ COPY --from=model-cache /model-cache /app/.cache
 # Copy application source only (no dev tools, no test files)
 COPY src ./src
 COPY scripts ./scripts
-COPY setup.py ./
+COPY setup.py index.html ./
 
 # Install curl for health checks, then drop cache
 RUN apt-get update && apt-get install -y --no-install-recommends curl \

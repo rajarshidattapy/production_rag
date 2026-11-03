@@ -24,6 +24,11 @@ setup(
     extras_require={
         "anthropic": ["anthropic>=0.30.0"],
         "dev": ["pytest>=7.4.0", "pytest-cov>=4.1.0", "tqdm>=4.65.0", "rank-bm25>=0.2.2"],
+        "monitoring": [
+            "langfuse>=2.60,<3",
+            "opentelemetry-sdk>=1.30",
+            "opentelemetry-exporter-otlp-proto-http>=1.30",
+        ],
         "all": ["anthropic>=0.30.0", "tqdm>=4.65.0"],
     },
     classifiers=[

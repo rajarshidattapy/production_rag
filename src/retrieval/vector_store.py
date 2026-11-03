@@ -5,12 +5,15 @@ from __future__ import annotations
 import logging
 import uuid
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import chromadb
+import httpx
 import numpy as np
 from chromadb.config import Settings as ChromaSettings
+from chromadb.errors import NotFoundError
 
 from src.ingestion.chunker import Chunk
 from src.utils.retry import retry_with_backoff
@@ -19,6 +22,12 @@ logger = logging.getLogger(__name__)
 
 # Module-level cache so all VectorStore instances using the same model share one copy.
 _EMBEDDING_MODEL_CACHE: dict[str, Any] = {}
+
+T = TypeVar("T")
+
+
+class VectorStoreUnavailableError(RuntimeError):
+    """The vector database cannot be reached: a server-side outage, not bad input."""
 
 
 class VectorStore:
@@ -67,15 +76,22 @@ class VectorStore:
             _host: str = self.chroma_host  # narrow str | None → str for the closure
 
             def _init_client():
-                client = chromadb.HttpClient(
-                    host=_host,
-                    port=self.chroma_port or 8000,
-                    settings=ChromaSettings(anonymized_telemetry=False),
-                )
-                client.heartbeat()
+                try:
+                    client = chromadb.HttpClient(
+                        host=_host,
+                        port=self.chroma_port or 8000,
+                        settings=ChromaSettings(anonymized_telemetry=False),
+                    )
+                    client.heartbeat()
+                except (ValueError, httpx.TransportError) as exc:
+                    # Chroma reports an unreachable server as ValueError, which callers
+                    # would otherwise treat as invalid user input.
+                    raise VectorStoreUnavailableError(
+                        f"Cannot reach Chroma at {_host}:{self.chroma_port or 8000}"
+                    ) from exc
                 return client
 
-            self._client = retry_with_backoff(_init_client, retries=5, backoff_in_seconds=1.0)
+            self._client = retry_with_backoff(_init_client, retries=3, backoff_in_seconds=0.5)
         else:
             self.persist_path.mkdir(parents=True, exist_ok=True)
             self._client = chromadb.PersistentClient(
@@ -132,6 +148,34 @@ class VectorStore:
         except Exception:
             logger.debug("Could not update HNSW ef_search", exc_info=True)
 
+    def _collection_call(self, op: Callable[[Any], T]) -> T:
+        """Run ``op(collection)`` with retries, surviving a reset done by another replica.
+
+        Resetting the store deletes and recreates the collection under a new ID, which
+        leaves every other process holding a handle to a collection that no longer exists.
+        """
+
+        def attempt() -> T:
+            try:
+                return op(self._collection)
+            except NotFoundError:
+                self._collection = self._get_or_create_collection()
+                return op(self._collection)
+
+        try:
+            return retry_with_backoff(attempt, retries=3, backoff_in_seconds=0.5)
+        except httpx.TransportError as exc:
+            raise VectorStoreUnavailableError(
+                f"Lost connection to Chroma: {type(exc).__name__}"
+            ) from exc
+
+    def heartbeat(self) -> None:
+        """Raise ``VectorStoreUnavailableError`` unless the database answers right now."""
+        try:
+            self._client.heartbeat()
+        except (ValueError, httpx.TransportError) as exc:
+            raise VectorStoreUnavailableError("Chroma did not answer a heartbeat") from exc
+
     # ------------------------------------------------------------------
     # Indexing
     # ------------------------------------------------------------------
@@ -161,14 +205,14 @@ class VectorStore:
         for start in range(0, len(ids), batch_size):
             end = start + batch_size
 
-            def _add_batch(_s: int = start, _e: int = end) -> None:
-                self._collection.add(
+            def _add_batch(collection: Any, _s: int = start, _e: int = end) -> None:
+                collection.add(
                     ids=ids[_s:_e],
                     documents=documents[_s:_e],
                     metadatas=metadatas[_s:_e],
                 )
 
-            retry_with_backoff(_add_batch, retries=3, backoff_in_seconds=0.5)
+            self._collection_call(_add_batch)
         logger.info("Added %d chunks to collection '%s'", len(ids), self.collection_name)
         return len(ids)
 
@@ -184,7 +228,7 @@ class VectorStore:
 
     def count(self) -> int:
         """Return the number of chunks in the collection."""
-        return retry_with_backoff(self._collection.count, retries=3, backoff_in_seconds=0.5)
+        return self._collection_call(lambda collection: collection.count())
 
     def embedding_cache_stats(self) -> dict[str, int]:
         """Return query-embedding cache hit/miss/size counters for this store."""
@@ -205,15 +249,15 @@ class VectorStore:
         Returns a list of dicts with keys: id, document, metadata, distance.
         """
 
-        def _search():
-            return self._collection.query(
+        def _search(collection: Any):
+            return collection.query(
                 query_texts=[query],
                 n_results=k,
                 where=where,
                 include=["documents", "metadatas", "distances"],
             )
 
-        results = retry_with_backoff(_search, retries=3, backoff_in_seconds=0.5)
+        results = self._collection_call(_search)
 
         return self._format_results(results)
 
@@ -228,12 +272,10 @@ class VectorStore:
         offset = 0
         while True:
 
-            def _get(_o: int = offset):
-                return self._collection.get(include=include, limit=page_size, offset=_o)
+            def _get(collection: Any, _o: int = offset):
+                return collection.get(include=include, limit=page_size, offset=_o)
 
-            page = self._format_get_results(
-                retry_with_backoff(_get, retries=3, backoff_in_seconds=0.5)
-            )
+            page = self._format_get_results(self._collection_call(_get))
             if not page:
                 return
             yield page
@@ -251,12 +293,10 @@ class VectorStore:
         for start in range(0, len(ids), batch_size):
             batch = ids[start : start + batch_size]
 
-            def _get(_b: list[str] = batch):
-                return self._collection.get(ids=_b, include=["documents", "metadatas"])
+            def _get(collection: Any, _b: list[str] = batch):
+                return collection.get(ids=_b, include=["documents", "metadatas"])
 
-            for chunk in self._format_get_results(
-                retry_with_backoff(_get, retries=3, backoff_in_seconds=0.5)
-            ):
+            for chunk in self._format_get_results(self._collection_call(_get)):
                 found[chunk["id"]] = chunk
         return [found[i] for i in ids if i in found]
 
@@ -277,10 +317,7 @@ class VectorStore:
     def delete_chunks(self, chunk_ids: list[str]) -> None:
         """Remove specific chunks by ID."""
 
-        def _delete_ids():
-            self._collection.delete(ids=chunk_ids)
-
-        retry_with_backoff(_delete_ids, retries=3, backoff_in_seconds=0.5)
+        self._collection_call(lambda collection: collection.delete(ids=chunk_ids))
 
     # ------------------------------------------------------------------
     # Helpers
@@ -336,7 +373,7 @@ class _ChromaEmbeddingFunction:
 
     def __init__(self, model_name: str, query_cache_size: int = 256) -> None:
         self.model_name = model_name
-        self._model = None
+        self._model: Any = None
         self._query_cache_size = query_cache_size
         self._query_cache: OrderedDict[str, list[float]] = OrderedDict()
         self._cache_hits = 0
