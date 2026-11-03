@@ -2,7 +2,7 @@ name: Evaluate — RAG Faithfulness Quality Gate
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   workflow_dispatch:
     inputs:
       fail_on_threshold:
@@ -11,11 +11,31 @@ on:
         default: true
 
 jobs:
+  # The gate calls a paid LLM API. Without the secret it would fail on every push,
+  # so skip it with a visible notice instead. A job-level `if` cannot read secrets.
+  check-secret:
+    name: Check for evaluation API key
+    runs-on: ubuntu-latest
+    outputs:
+      has_key: ${{ steps.check.outputs.has_key }}
+    steps:
+      - id: check
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -n "$OPENAI_API_KEY" ]; then
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::OPENAI_API_KEY secret is not set; skipping the RAG evaluation gate."
+          fi
+
   evaluate:
     name: RAG Evaluation Quality Gate
+    needs: check-secret
     runs-on: ubuntu-latest
     # Only run on internal pushes/dispatches — secrets are not passed to fork PRs.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: needs.check-secret.outputs.has_key == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
 
     steps:
       - uses: actions/checkout@v7

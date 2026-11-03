@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import contextvars
 import logging
 import threading
 import time
-from collections.abc import Generator
+from collections.abc import AsyncGenerator, Generator
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -243,11 +246,26 @@ class _HookObserver:
         self._run_hook("on_step_error", name, exc)
 
 
+def _count_tokens(text: str, model: str = "gpt-4") -> int:
+    """Count tokens with tiktoken when available, else estimate from the length."""
+    try:
+        import importlib
+
+        tiktoken = importlib.import_module("tiktoken")
+        encoding = tiktoken.encoding_for_model(model)
+        return len(encoding.encode(text))
+    except Exception:
+        return max(1, len(text) // 4)
+
+
 class MonitoredRAGPipeline:
     """Instrumented wrapper around RAGPipeline.
 
     Adds Langfuse tracing and OTel metrics to every pipeline step
     via a pluggable extension architecture.
+
+    Trace nesting and per-query token totals are thread-local, because the HTTP service
+    runs concurrent queries, each on its own worker thread.
     """
 
     def __init__(
@@ -257,6 +275,7 @@ class MonitoredRAGPipeline:
         metrics: Any | None = None,
         extensions: list[BaseExtension] | None = None,
     ) -> None:
+        self._usage_local = threading.local()
         self._pipeline = pipeline
         self.extensions = extensions or []
 
@@ -291,6 +310,29 @@ class MonitoredRAGPipeline:
         self._last_query_cost = 0.0
 
         self._instrument_pipeline()
+
+    @property
+    def _last_query_tokens(self) -> dict[str, int]:
+        return getattr(self._usage_local, "tokens", {"prompt": 0, "completion": 0, "total": 0})
+
+    @_last_query_tokens.setter
+    def _last_query_tokens(self, value: dict[str, int]) -> None:
+        self._usage_local.tokens = value
+
+    @property
+    def _last_query_cost(self) -> float:
+        return getattr(self._usage_local, "cost", 0.0)
+
+    @_last_query_cost.setter
+    def _last_query_cost(self, value: float) -> None:
+        self._usage_local.cost = value
+
+    def __getattr__(self, name: str) -> Any:
+        # The API reaches pipeline internals (stores, retrievers). Instrumented steps are
+        # patched onto the wrapped pipeline itself, so delegation still goes through them.
+        if name == "_pipeline":
+            raise AttributeError(name)
+        return getattr(self._pipeline, name)
 
     def _run_hook(self, ext_method_name: str, *args: Any, **kwargs: Any) -> None:
         for ext in self.extensions:
@@ -627,6 +669,153 @@ class MonitoredRAGPipeline:
         )
         return result
 
+    async def query_async(
+        self,
+        question: str,
+        top_k: int | None = None,
+        use_hybrid: bool = False,
+        use_reranker: bool = False,
+        self_heal: bool | None = None,
+    ) -> tuple[str, list[Any]]:
+        """Traced query on a worker thread, so the whole trace nests on that one thread."""
+        return await asyncio.to_thread(
+            self.query,
+            question,
+            top_k=top_k,
+            use_hybrid=use_hybrid,
+            use_reranker=use_reranker,
+            self_heal=self_heal,
+        )
+
+    async def query_with_healing_async(
+        self,
+        question: str,
+        top_k: int | None = None,
+        use_hybrid: bool = False,
+        use_reranker: bool = False,
+    ) -> Any:
+        """Traced self-healing query on a worker thread."""
+        return await asyncio.to_thread(
+            self.query_with_healing,
+            question,
+            top_k=top_k,
+            use_hybrid=use_hybrid,
+            use_reranker=use_reranker,
+        )
+
+    async def stream_answer(
+        self,
+        question: str,
+        top_k: int | None = None,
+        use_hybrid: bool = False,
+        use_reranker: bool = False,
+    ) -> AsyncGenerator[tuple[str, Any], None]:
+        """Traced ``RAGPipeline.stream_answer``.
+
+        Spans are nested per thread, so every hook and blocking step of one stream runs on
+        its own single-thread executor, while tokens arrive on the event loop. Token counts
+        are estimates because streaming responses do not report usage.
+        """
+        loop = asyncio.get_running_loop()
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rag-stream-trace")
+
+        async def run_blocking(fn: Any, *args: Any, **kwargs: Any) -> Any:
+            context = contextvars.copy_context()
+            return await loop.run_in_executor(executor, partial(context.run, fn, *args, **kwargs))
+
+        start = time.monotonic()
+        generator = self._pipeline.generator
+        provider = getattr(generator, "provider", "openai")
+        model = getattr(generator, "model", "gpt-4o-mini")
+        metadata = {
+            "hybrid": use_hybrid,
+            "reranker": use_reranker,
+            "top_k": top_k,
+            "streaming": True,
+        }
+        contexts: list[Any] = []
+        tokens: list[str] = []
+        first_token_at: float | None = None
+        generation_started = False
+
+        try:
+            await run_blocking(self._run_hook, "on_query_start", question, metadata)
+            async for kind, value in self._pipeline.stream_answer(
+                question,
+                top_k=top_k,
+                use_hybrid=use_hybrid,
+                use_reranker=use_reranker,
+                run_blocking=run_blocking,
+            ):
+                if kind == "contexts":
+                    contexts = value
+                    await run_blocking(
+                        self._run_hook,
+                        "on_step_start",
+                        "generate",
+                        {"query": question, "contexts_count": len(contexts)},
+                        {},
+                    )
+                    generation_started = True
+                elif kind == "token":
+                    if first_token_at is None and value:
+                        first_token_at = time.monotonic()
+                        await run_blocking(self._run_hook, "on_first_token", first_token_at - start)
+                    tokens.append(value)
+                elif kind == "citations":
+                    answer = "".join(tokens)
+                    prompt = _get_default_system_prompt().format(
+                        context=generator._format_context(contexts)
+                    )
+                    usage = {
+                        "prompt_tokens": _count_tokens(f"{prompt}\n{question}", model),
+                        "completion_tokens": _count_tokens(answer, model),
+                    }
+                    usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+                    cost = self._tracer._pricing.get_cost(
+                        provider, model, usage["prompt_tokens"], usage["completion_tokens"]
+                    )
+                    await run_blocking(
+                        self._run_hook,
+                        "on_generation_llm_call",
+                        model=model,
+                        provider=provider,
+                        prompt=prompt,
+                        query=question,
+                        response=answer,
+                        usage=usage,
+                        cost=cost,
+                    )
+                    await run_blocking(
+                        self._run_hook,
+                        "on_step_end",
+                        "generate",
+                        {"answer": answer},
+                        time.monotonic() - start,
+                    )
+                    generation_started = False
+                    await run_blocking(
+                        self._run_hook,
+                        "on_query_end",
+                        answer,
+                        value,
+                        time.monotonic() - start,
+                        {
+                            "prompt": usage["prompt_tokens"],
+                            "completion": usage["completion_tokens"],
+                            "total": usage["total_tokens"],
+                        },
+                        cost,
+                    )
+                yield (kind, value)
+        except Exception as exc:
+            if generation_started:
+                await run_blocking(self._run_hook, "on_step_error", "generate", exc)
+            await run_blocking(self._run_hook, "on_query_error", exc)
+            raise
+        finally:
+            executor.shutdown(wait=False)
+
     def query_stream(
         self,
         question: str,
@@ -666,15 +855,7 @@ class MonitoredRAGPipeline:
             self._run_hook("on_query_error", exc)
             raise
 
-        def count_tokens(text: str, model: str = "gpt-4") -> int:
-            try:
-                import importlib
-
-                tiktoken = importlib.import_module("tiktoken")
-                encoding = tiktoken.encoding_for_model(model)
-                return len(encoding.encode(text))
-            except Exception:
-                return max(1, len(text) // 4)
+        count_tokens = _count_tokens
 
         def on_first_token(ttft: float):
             self._run_hook("on_first_token", ttft)
@@ -751,7 +932,6 @@ class MonitoredRAGPipeline:
                 with anthropic_client.messages.stream(
                     model=mdl,
                     max_tokens=getattr(self_gen, "max_tokens", 1024),
-                    temperature=getattr(self_gen, "temperature", 0.0),
                     system=prompt_content,
                     messages=[{"role": "user", "content": q}],
                 ) as stream:

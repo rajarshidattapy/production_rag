@@ -2,7 +2,7 @@
 
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
 
-A **Retrieval-Augmented Generation (RAG)** service built with FastAPI, ChromaDB, and OpenAI, OpenRouter, or Anthropic models. It goes from a vector-search baseline to optional hybrid retrieval, optional cross-encoder reranking, optional self-healing, and LLM-as-judge evaluation, with Prometheus metrics in the HTTP service and an OpenTelemetry/Langfuse instrumentation wrapper for library use.
+A **Retrieval-Augmented Generation (RAG)** service built with FastAPI, ChromaDB, and OpenAI, OpenRouter, or Anthropic models. It goes from a vector-search baseline to optional hybrid retrieval, optional cross-encoder reranking, optional self-healing, and LLM-as-judge evaluation, with Prometheus metrics always on in the HTTP service and OpenTelemetry and Langfuse instrumentation behind `MONITOR_ENABLED`.
 ---
 
 ## High-level overview
@@ -120,7 +120,7 @@ These are two separate steps, and only the first always happens.
 So without self-healing, `[n]` markers are whatever the model wrote and nothing checks them. Two further limits apply:
 
 - `citations` is the list of retrieved passages, not a list of the passages the answer actually relied on.
-- Without self-healing, the list is built before the context budget is applied, so it can include passages the model never saw. With self-healing, it is built from the passages shown to the model, so `[n]` maps to `citations[n-1]`.
+- On `POST /query` without self-healing, the list is built before the context budget is applied, so it can include passages the model never saw. `/query/stream` and self-healing build it from the passages shown to the model, so `[n]` maps to `citations[n-1]`.
 
 Citation support is a word-overlap heuristic, so it can catch a misattributed citation but cannot prove a claim is true. Claim-level checking comes from the separate LLM judge, which also runs only with self-healing.
 
@@ -141,22 +141,22 @@ Citation support is a word-overlap heuristic, so it can catch a misattributed ci
 
 - **Self-Healing Answers (opt-in)** — A verifier checks every answer (citation range and support, retrieval sufficiency, refusal detection, then an LLM judge for faithfulness, relevance, and unresolved contradictions). Failures are diagnosed deterministically into retrieval / query / context / generation / citation failures and repaired accordingly — query rewrite with adapted hybrid retrieval, context expansion, or regeneration with a repair prompt — then re-verified. After `RAG_MAX_HEALING_ATTEMPTS` the service returns a structured abstention instead of an unverified answer. Enable with `RAG_SELF_HEALING_ENABLED=true` or `"self_heal": true` per request.
 - **Hybrid Search (opt-in)** — BM25 (built-in inverted index, numpy only) + ChromaDB vector similarity fused with alpha-weighted Reciprocal Rank Fusion. Enable with `"use_hybrid": true`. The BM25 side holds only chunk IDs and term postings (~1.2 KB per chunk) and fetches hit text from the vector store; ingests append to an on-disk journal, and restarts load the index in well under a second. It persists with 0o600 permissions and a size safety guard.
-- **Query Embedding Cache** — An in-process LRU cache (`RAG_EMBEDDING_QUERY_CACHE_SIZE`, default 256) avoids re-running the embedding model for repeated queries. It matches the exact query text, so a paraphrase is a miss. Hit/miss counts are in `/stats` (English collection only), not `/metrics`.
-- **Cross-Encoder Reranking (opt-in)** — Reorders retrieved chunks before generation, on either vector or hybrid results. Enable with `"use_reranker": true`. The default model is `BAAI/bge-reranker-large`; `.env.example` sets the much smaller `cross-encoder/ms-marco-MiniLM-L-6-v2` instead, so check which one your `.env` selects.
+- **Query Embedding Cache** — An in-process LRU cache (`RAG_EMBEDDING_QUERY_CACHE_SIZE`, default 256) avoids re-running the embedding model for repeated queries. It matches the exact query text, so a paraphrase is a miss. Hit/miss counts are in `/stats`, not `/metrics`.
+- **Cross-Encoder Reranking (opt-in)** — Reorders retrieved chunks before generation, on either vector or hybrid results. Enable with `"use_reranker": true`. The default model is `cross-encoder/ms-marco-MiniLM-L-6-v2`, chosen for its small size (about 80 MB) because reranking runs on one CPU thread. It was trained on English; for German or Spanish corpora, consider setting `RAG_RERANKER_MODEL=BAAI/bge-reranker-v2-m3`.
 - **Multilingual Routing** — `langdetect` runs per chunk at ingest and per query, routing to per-language ChromaDB collections (en/de/es; anything else falls back to `en`), with prompts translated via gettext. A query searches only its detected language's collection, so a German question will not find English documents.
 - **SSE Token Streaming** — `/query/stream` endpoint delivers tokens over Server-Sent Events as they are generated; compatible with any EventSource client.
-- **Async Ingestion** — `POST /ingest/async` enqueues ingestion as a background job and returns a `job_id` immediately (202), avoiding client/proxy timeouts on large corpora; poll `GET /ingest/jobs/{job_id}` for status. Job status is held in memory, so it is lost on restart and is not shared between replicas.
+- **Async Ingestion** — `POST /ingest/async` enqueues ingestion as a background job and returns a `job_id` immediately (202), avoiding client/proxy timeouts on large corpora; poll `GET /ingest/jobs/{job_id}` for status. Job status is saved to `data/ingest_jobs.json`, so it survives a restart; a job cut off by a restart reports `interrupted`. It is shared between replicas only if they share that disk.
 - **LLM Backends** — OpenAI or Anthropic via `RAG_LLM_PROVIDER`, chosen at startup, with streaming for both. Provider-qualified model names or an `sk-or-` key route the OpenAI client to OpenRouter (`RAG_OPENROUTER_MODE` overrides this).
 - **Optional API Key Auth** — Set `RAG_API_KEY` to require `Authorization: Bearer <key>` on every route except `/healthz` and the UI page. Auth is off when the variable is unset, which is the default.
 - **Prometheus Metrics and Dashboard** — `/metrics` exposes per-route request counts and latency plus self-healing counters. The UI's Observability button shows them as a dashboard.
-- **OpenTelemetry and Langfuse Instrumentation (library wrapper)** — `MonitoredRAGPipeline` traces ingest, retrieve, rerank, generate, and each healing step, with token and cost attribution and a circuit breaker. The HTTP service does not use this wrapper yet; see [Monitoring & Observability](#monitoring--observability).
+- **OpenTelemetry and Langfuse Instrumentation (opt-in)** — With `MONITOR_ENABLED=true`, the HTTP service runs through `MonitoredRAGPipeline`, which traces ingest, retrieve, rerank, generate, and each healing step, with token and cost attribution and a circuit breaker. See [Monitoring & Observability](#monitoring--observability).
 - **Prompt Registry** — SHA-256 hash-based change detection for prompt versioning across deployments.
 - **LLM-as-Judge Evaluation** — All four RAGAS-style quality dimensions via `gpt-4o-mini` against a golden JSONL dataset, with CI quality gate (`--fail-on-threshold`): faithfulness, answer relevance, context precision (Average Precision @ k — are retrieved chunks relevant, ranked well?), and context recall (are reference-answer statements attributable to the retrieved context?).
 - **X-Request-ID** — Middleware echoes or generates an `X-Request-ID` header on every response. It is not yet attached to logs or traces.
 - **Context Budget** — `RAG_MAX_CONTEXT_CHARS` (default 12000) caps the context sent to the LLM as a cost guardrail. Passages past the budget are dropped, and the last one that fits is cut at the character limit, which can be mid-sentence.
 - **Security Hardening** — Path-traversal guards on `/ingest`, BM25 index stored as plain integer arrays loaded with `allow_pickle=False` (no pickle), 0o600 file permissions on data files, `re.escape()` on pricing pattern matching to prevent ReDoS.
-- **Docker Multi-Stage Build** — `deps → model-cache → runtime` stages; non-root user, with both reranker models cached in the image. Not yet built or run as part of validation; see [known gaps](#known-gaps-to-close-before-production).
-- **Tests and CI Definitions** — 251 unit, integration, and stress tests (LLM calls mocked; no API keys needed). Three GitHub Actions workflows are defined for CI, the evaluation gate, and GHCR publish, but their branch triggers do not match this repository yet, so they have not run.
+- **Docker Multi-Stage Build** — `deps → model-cache → runtime` stages; non-root user, with the default embedding and reranker models cached in the image. The image and compose stack have not been run end to end yet; see [known gaps](#known-gaps-to-close-before-production).
+- **Tests and CI** — 280 unit, integration, and stress tests (LLM calls mocked; no API keys needed). GitHub Actions workflows cover CI, the evaluation gate (skipped when the `OPENAI_API_KEY` secret is absent), and GHCR publish on every push to `master`.
 
 ---
 
@@ -227,8 +227,8 @@ uvicorn src.api:app --reload --host 0.0.0.0 --port 8000
 | ------ | ----------------------- | ------------------------------------------------------------------------------------------------------ |
 | `GET`  | `/`                     | Browser UI, including the Observability dashboard (no auth)                                            |
 | `GET`  | `/healthz`              | Liveness probe — returns `{"status": "ok"}` (no auth)                                                  |
-| `GET`  | `/readyz`               | Readiness probe — builds the per-language stores, BM25 indexes, and reranker object once. Later calls reuse them, so it does not detect a Chroma outage |
-| `GET`  | `/stats`                | Pipeline statistics (model, config, and chunk and cache counts for the English collection only)        |
+| `GET`  | `/readyz`               | Readiness probe — builds the per-language stores, BM25 indexes, and reranker object, and sends Chroma a heartbeat on every call. Returns 503 when Chroma is unreachable |
+| `GET`  | `/stats`                | Pipeline statistics (model, config, and chunk and cache counts totalled across all languages)          |
 | `GET`  | `/metrics`              | Prometheus scrape endpoint — request count + latency histograms by route, plus `rag_healing_*` metrics |
 | `POST` | `/upload`               | Save a browser-uploaded **PDF** under `data/uploads` (does not index it; call `/ingest` next)          |
 | `POST` | `/ingest`               | Ingest PDF, TXT, MD, or JSON from a path inside the data directory (blocks until done)                 |
@@ -302,6 +302,8 @@ streamed, with one extra `data: {"healing": {...}}` event before `citations`.
 | `X-Request-ID`                | Optional correlation ID; echoed in response (generated if absent) |
 
 
+`POST /query` returns **503** when Chroma is unreachable and **504** when it exceeds `RAG_QUERY_TIMEOUT_SECONDS`. `/query/stream` reports both as an `error` event, because its status line has already been sent. After a timeout, a self-healing or vector-search worker thread can keep running until its own client timeout ends it.
+
 `POST /query` responses also carry `X-RAG-Prompt-Tokens`, `X-RAG-Completion-Tokens`, `X-RAG-Total-Tokens`, and `X-RAG-LLM-Latency-Sec`, summed across every LLM call in the request. These are headers only; they are not in the JSON body and are not sent by `/query/stream`.
 
 
@@ -318,7 +320,7 @@ All settings use the `RAG_` prefix and can be set via `.env` or environment vari
 | -------------------------------- | -------------------------------------- | ----------------------------------------------------------- |
 | `RAG_LLM_PROVIDER`               | `openai`                               | LLM backend: `openai` or `anthropic`                        |
 | `RAG_LLM_MODEL`                  | `gpt-4o-mini`                          | Model name for the selected provider                        |
-| `RAG_OPENROUTER_MODE`            | `auto`                                 | `true`/`false` forces OpenRouter routing on or off for the OpenAI client |
+| `RAG_OPENROUTER_MODE`            | `auto`                                 | `true`/`false` forces OpenRouter routing on or off for the OpenAI client. An explicit `OPENAI_BASE_URL` always takes priority |
 | `RAG_CHROMA_HOST`, `RAG_CHROMA_PORT` | *(unset)*                          | Use a Chroma server instead of the embedded store           |
 | `OPENAI_API_KEY`                 | —                                      | OpenAI API key                                              |
 | `ANTHROPIC_API_KEY`              | —                                      | Anthropic API key                                           |
@@ -329,6 +331,7 @@ All settings use the `RAG_` prefix and can be set via `.env` or environment vari
 | `RAG_TOP_K_RETRIEVAL`            | `20`                                   | Candidates fetched before reranking                         |
 | `RAG_TOP_K_FINAL`                | `5`                                    | Final context chunks passed to the LLM                      |
 | `RAG_MAX_CONTEXT_CHARS`          | `12000`                                | Total context characters sent to the LLM (`0` disables)     |
+| `RAG_QUERY_TIMEOUT_SECONDS`      | `180`                                  | Overall limit for one query, including retries and self-healing (`0` disables) |
 | `RAG_MAX_FILE_SIZE_MB`           | `50`                                   | Per-file limit for upload and ingest                        |
 | `RAG_HYBRID_ALPHA`               | `0.6`                                  | Hybrid RRF weight: 1.0 = pure vector, 0.0 = pure BM25       |
 | `RAG_RRF_K`                      | `60`                                   | Hybrid RRF constant (multi-query RRF is fixed at 60)        |
@@ -337,7 +340,7 @@ All settings use the `RAG_` prefix and can be set via `.env` or environment vari
 | `RAG_HNSW_EF_CONSTRUCTION`       | `100`                                  | HNSW build breadth (new collections only)                   |
 | `RAG_BM25_MAX_INDEX_MB`          | `500`                                  | Max BM25 index file persisted/loaded (~1 KB/chunk; use ~2000 for 1M chunks) |
 | `RAG_EMBEDDING_QUERY_CACHE_SIZE` | `256`                                  | LRU cache size for repeated query embeddings (`0` disables) |
-| `RAG_RERANKER_MODEL`             | `BAAI/bge-reranker-large`              | Cross-encoder model. `.env.example` overrides this with `cross-encoder/ms-marco-MiniLM-L-6-v2` |
+| `RAG_RERANKER_MODEL`             | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder model                                         |
 | `RAG_FAITHFULNESS_THRESHOLD`     | `0.7`                                  | Minimum faithfulness score for CI gate                      |
 | `RAG_CORS_ORIGINS`               | `*`                                    | Comma-separated allowed CORS origins                        |
 | `RAG_API_KEY`                    | *(unset)*                              | Bearer token for API auth (disabled when unset)             |
@@ -367,7 +370,7 @@ More tuning knobs (`RAG_HEALING_*`) are documented in the [Self-Healing section]
 
 | Variable                                   | Default                 | Description                                                                     |
 | ------------------------------------------ | ----------------------- | ------------------------------------------------------------------------------- |
-| `MONITOR_ENABLED`                          | `false`                 | Enables `MonitoredRAGPipeline` in `scripts/evaluate.py`. It has **no effect** on the HTTP service |
+| `MONITOR_ENABLED`                          | `false`                 | Runs the HTTP service and `scripts/evaluate.py` through `MonitoredRAGPipeline`  |
 | `MONITOR_LANGFUSE_SECRET_KEY`              | —                       | Langfuse secret key (`sk-lf-…`)                                                 |
 | `MONITOR_LANGFUSE_PUBLIC_KEY`              | —                       | Langfuse public key (`pk-lf-…`)                                                 |
 | `MONITOR_LANGFUSE_HOST`                    | `http://localhost:3000` | Langfuse server URL                                                             |
@@ -381,11 +384,11 @@ More tuning knobs (`RAG_HEALING_*`) are documented in the [Self-Healing section]
 
 ## Monitoring &amp; Observability
 
-There are two layers, and which one you get depends on how you run the pipeline.
+There are two layers. The first is always on in the HTTP service, and the second is added by `MONITOR_ENABLED=true`.
 
 ```mermaid
 flowchart LR
-    subgraph HTTP["HTTP service: uvicorn src.api:app (always on)"]
+    subgraph HTTP["Always on: uvicorn src.api:app"]
         MW[Prometheus middleware<br/>every route] --> METRICS["/metrics"]
         ENGINE[HealingEngine] --> METRICS
         PROBES["/healthz, /readyz, /stats"]
@@ -393,37 +396,37 @@ flowchart LR
         METRICS --> DASH[UI dashboard]
         PROBES --> DASH
     end
-    subgraph WRAP["Wrapper: MonitoredRAGPipeline (library, or evaluate.py with MONITOR_ENABLED=true)"]
-        STAGES[ingest, retrieve, rerank,<br/>generate, query_stream,<br/>each healing step] --> EXT[Extension hooks<br/>circuit breaker]
+    subgraph WRAP["With MONITOR_ENABLED=true: MonitoredRAGPipeline"]
+        STAGES[ingest, retrieve, rerank,<br/>generate, streaming,<br/>each healing step] --> EXT[Extension hooks<br/>circuit breaker]
         EXT --> LF[Langfuse traces,<br/>tokens and cost]
         EXT --> OTLP[OTLP metrics]
         STAGES --> REG[Prompt registry]
     end
 ```
 
-**The HTTP service does not use the wrapper.** `src/api.py` builds a plain `RAGPipeline`, so setting `MONITOR_ENABLED=true` on the server produces no Langfuse traces or OTLP metrics. The wrapper also has no async query method, while `/query` calls `query_async`, so wiring it in needs code changes, not just configuration.
+The wrapper applies to the HTTP service and `scripts/evaluate.py`. `requirements.txt` includes the Langfuse v2 SDK (the tracer uses its `trace()`/`span()` API, so it is pinned below v3) and the OTLP exporter. The drill confirmed that a server with this setting sends metrics and traces to the configured endpoints, using local fake endpoints rather than real Langfuse or collector services.
 
 ### What each pipeline stage emits
 
-| Stage | HTTP service | `MonitoredRAGPipeline` |
+| Stage | Always on | With `MONITOR_ENABLED=true` |
 | ----- | ------------ | ---------------------- |
 | Upload, ingest | Request count and latency per route | `ingest` span |
-| Retrieve (vector or hybrid) | Only inside total `/query` latency | `retrieve` span and latency histogram |
-| Rerank | Only inside total `/query` latency | `rerank` span with pre- and post-scores |
-| Generate | Tokens and LLM latency as `/query` response headers | `generate` span with model, tokens, and cost |
+| Retrieve (vector or hybrid) | Only inside total request latency | `retrieve` span and latency histogram |
+| Rerank | Only inside total request latency | `rerank` span with pre- and post-scores |
+| Generate | Tokens and LLM latency as `/query` response headers | `generate` span with model, tokens, and cost (estimated tokens when streaming) |
 | Verify and repair | `rag_healing_*` metrics on `/metrics` | The same metrics exported over OTLP, plus one span per step |
-| Embedding cache | Hit and miss counts in `/stats` (English collection only) | Not recorded |
+| Embedding cache | Hit and miss counts in `/stats` | Not recorded |
 | Errors | Per-route counts by status code | `rag_{step}_errors_total`, span errors |
 
-`scripts/query.py` and `scripts/ingest.py` use the plain pipeline, so they emit none of the wrapper's signals. Prometheus counters are per process and reset on restart, so a multi-replica deployment needs Prometheus to scrape and aggregate each replica. There is no logging correlation yet: `X-Request-ID` is returned to the caller but is not attached to log lines or traces.
+`scripts/query.py` and `scripts/ingest.py` use the plain pipeline, so they emit none of these signals. Prometheus counters are per process and reset on restart, so a multi-replica deployment needs Prometheus to scrape and aggregate each replica. There is no logging correlation yet: `X-Request-ID` is returned to the caller but is not attached to log lines or traces.
 
 ### Prometheus (HTTP service)
 
 `GET /metrics` exposes `rag_http_requests_total{path,method,status_code}`, `rag_http_request_duration_seconds{path,method}`, and the `rag_healing_*` metrics listed under [Self-Healing Observability](#self-healing-observability). The UI's **Observability** button reads these along with `/healthz` and `/stats`, and excludes health checks and its own polling from the request counts.
 
-### OpenTelemetry Metrics (wrapper)
+### OpenTelemetry Metrics
 
-With a `MetricsCollector` attached and an OTLP endpoint reachable, the wrapper exports:
+With `MONITOR_ENABLED=true` and an OTLP endpoint reachable, these are exported:
 
 - **`rag_{retrieve,rerank,generate,query_total}_latency_seconds`** — latency histograms per step
 - **`rag_{retrieve,rerank,generate,query_total}_errors_total`** — error counters per step
@@ -432,9 +435,9 @@ With a `MetricsCollector` attached and an OTLP endpoint reachable, the wrapper e
 
 A JSON summary (P50/P95 latency, avg cost, error count) is exported via `MetricsCollector.export_summary()` and written with 0o600 permissions.
 
-### Langfuse Tracing (wrapper)
+### Langfuse Tracing
 
-With Langfuse credentials set, each query through the wrapper creates a trace with spans for:
+With `MONITOR_ENABLED=true` and Langfuse credentials set, each query creates a trace with spans for:
 
 - `retrieve` — vector/hybrid search timing
 - `rerank` — cross-encoder reranking timing
@@ -444,18 +447,18 @@ A circuit breaker (`MONITOR_CIRCUIT_BREAKER_THRESHOLD`) isolates Langfuse failur
 
 ### Self-Healing Observability
 
-Healed queries through the wrapper (`MonitoredRAGPipeline.query_with_healing`, or `.query(..., self_heal=True)`)
+With `MONITOR_ENABLED=true`, healed queries
 get one span per healing step under the query trace — `retrieve_attempt_1`,
 `rerank_attempt_1`, `generate_attempt_1`, `verify_attempt_1`, `query_rewrite`,
 `retrieve_attempt_2`, … — with the verifier's decision (`passed`, `failure_type`,
 `reason`, scores) on each `verify_attempt_N` span.
 
-Healing metrics are recorded wherever healing runs, so they appear on `/metrics` in the HTTP service. They are exported to OTel only when a meter provider is installed, which the wrapper's `MetricsCollector` does:
+Healing metrics are recorded wherever healing runs, so they appear on `/metrics` in the HTTP service. They are also exported over OTLP with `MONITOR_ENABLED=true`:
 `rag.healing.attempts`, `rag.healing.success`, `rag.healing.failures{failure_type}`,
 `rag.healing.abstentions`, `rag.healing.query_rewrites`, `rag.healing.retrieval_retries`,
 `rag.healing.regenerations`, `rag.healing.latency` (Prometheus: `rag_healing_*`).
 
-### Using the Monitored Pipeline
+### Using the Monitored Pipeline as a Library
 
 ```python
 from src.monitoring import MetricsCollector, MonitoredRAGPipeline, Tracer
@@ -484,7 +487,7 @@ changed     = registry.detect_change("system_v1", new_prompt_text)
 
 ## Docker
 
-> These commands have not been validated end to end, and `docker compose up` has known blockers. See [known gaps](#known-gaps-to-close-before-production).
+> These commands have not been run end to end yet. See [known gaps](#known-gaps-to-close-before-production) for what has been checked.
 
 ### Build
 
@@ -502,6 +505,14 @@ docker run -p 8000:8000 \
   production-rag:latest
 ```
 
+### Compose
+
+```bash
+docker compose up --build
+```
+
+This starts the API and a private Chroma server. Compose reads the `RAG_LLM_*`, `RAG_API_KEY`, `RAG_CORS_ORIGINS`, `MONITOR_ENABLED`, and provider key values from your `.env` for substitution. On Linux hosts, `./data` must be writable by UID 1001, the user the API runs as.
+
 ---
 
 ## Why Not LangChain?
@@ -517,7 +528,7 @@ This project builds retrieval, fusion, reranking, and generation directly agains
 
 What changes as load grows, based on what has actually been measured. All numbers are from one Windows 11 laptop (16.8 GB RAM), and retrieval timings use stub embeddings. Treat them as relative guidance, not capacity figures.
 
-- **Horizontal scaling:** The drill ran two API replicas with separate disks on one Chroma server. Reads worked, and a document ingested through one replica was found by the other. Three caveats: a `reset=true` on one replica made the other return 500 on its next query; async job status is per process; and each replica detects BM25 staleness only by chunk count, so a same-count replacement ingested elsewhere goes unnoticed.
+- **Horizontal scaling:** The drill ran two API replicas with separate disks on one Chroma server. Reads worked, a document ingested through one replica was found by the other, and a replica recovers on its own after another resets the store. Two caveats: async job status is only shared if replicas share a disk, and each replica detects BM25 staleness by chunk count, so a same-count replacement ingested elsewhere goes unnoticed.
 - **Hybrid search at scale:** At 50k chunks, BM25 queries took 2-3 ms and a cold index load 0.2 s. A full rebuild took about 5 s. Memory measured at 100k chunks was about 1.2 KB per chunk, which extrapolates to about 1.2 GB at 1M chunks and needs `RAG_BM25_MAX_INDEX_MB` near 2000. The 1M figures have not been run.
 - **Vector search:** `RAG_HNSW_EF_SEARCH` matters most. On 50k synthetic vectors, recall@10 was 0.74 at 10, 0.996 at 100, and 1.000 at 200, with the same latency of about 1.4 ms. The default is 200. A single Chroma instance has no sharding or replicas. The per-language collections are a natural shard boundary if you move to a distributed vector database.
 - **Where the time goes:** In production the LLM call and reranker should dominate, not the vector store. This has not been measured with a real provider or model, so load-test those before sizing anything.
@@ -526,77 +537,84 @@ What changes as load grows, based on what has actually been measured. All number
 
 ## Production Readiness
 
-**Summary: production-oriented, not production-validated.** There is real evidence for correctness and for failure behaviour on one machine. There is no evidence yet from a production deployment, and CI and Docker have never been exercised.
+**Summary: production-oriented, not production-validated.** There is real evidence for correctness and for failure behaviour on one Windows machine. There is no evidence yet from Linux, from the Docker stack running end to end, or from a production deployment.
 
-Last assessed 2026-11-03 on commit `426fa53` plus the README changes.
+Last assessed 2026-11-03, on commit `a9d1baf` plus the fixes described here.
 
 ### Evidence
 
 | Area | Evidence | Status |
 | ---- | -------- | ------ |
-| Tests | `python -m pytest tests/`: 251 tests with mocked LLMs, 81% line coverage | Passing locally, with an intermittent failure: one of two full runs on this date had 1 failed test (not identified), and an earlier run failed `test_multilingual_ingestion_routing` with a Chroma HNSW error |
-| Vector store stress | `tests/test_vector_store_stress.py`: ingest, recall, concurrent reads and writes, deletes, persistence | Passes at 50k chunks embedded and at 20k against a Chroma server, with stub embeddings |
-| Failure drill | `python scripts/operational_drill.py`: real API and Chroma processes, hard-killed and restarted | 18 of 22 checks met, one run, results below |
+| CI steps, run locally | `ruff check`, `ruff format --check`, `mypy src/`, and `pytest --cov`, in a clean environment installed from `requirements-dev.txt` | All pass on Windows with Python 3.11: 280 tests, 84% line coverage. Not yet run on GitHub or on Linux |
+| Flaky test | An earlier full run had 1 failed test (not identified), and another failed `test_multilingual_ingestion_routing` with a Chroma HNSW error | Not reproduced in later runs, and the cause was not found, so it may return |
+| Vector store stress | `tests/test_vector_store_stress.py`: ingest, recall, concurrent reads and writes, deletes, persistence | Passes at 50k chunks embedded on the current code, with stub embeddings. It last passed at 20k against a Chroma server before this round of changes, and the drill has exercised server mode since |
+| Failure drill | `python scripts/operational_drill.py`: real API and Chroma processes, hard-killed and restarted | 26 of 26 checks met, results below |
 | Retrieval and answer quality | `scripts/evaluate.py` and `--healing-report` | **No published results.** They need a provider API key, and the test suite does not measure answer quality |
-| CI | `.github/workflows/` | **Never run.** All three workflows trigger on `main`, but the default branch is `master`. The only Actions runs on the repository are Dependabot's |
-| Docker image | `Dockerfile` | **Not built during this assessment** |
-| `docker compose` | `docker-compose.yml` | **Not run**, and two blockers were found by inspection (see below) |
+| Real providers | Anthropic and OpenAI calls | **Not run against live APIs.** Tests use mocks, and the drill uses a local fake. Mocks hid a bug that made every Anthropic call fail until `autospec` tests against the real SDK signatures were added |
+| Docker image | `Dockerfile` | **Not built.** Read through only |
+| `docker compose` | `docker-compose.yml` | **Not run.** Checked against the published Chroma 1.5.9 image: it persists to `/data`, and it has `bash` but no `curl` |
 | Production deployment | None | **None.** No real traffic, SLOs, alerting, on-call, or incident history |
 
 ### Failure drill results
 
-The drill uses real API and Chroma server processes on loopback, a local fake LLM with 50 ms latency, and stub embeddings. It therefore measures service behaviour and overhead, not real LLM, embedding, or reranker cost. Timings are from one run, and it does not involve Docker.
+The drill uses real API and Chroma server processes on loopback, a local fake LLM with 50 ms latency, and stub embeddings, so it measures service behaviour and overhead, not real LLM, embedding, or reranker cost. It runs outside the repository so it cannot read a developer's `.env`, and it refuses to start if LLM calls would go anywhere but the local fake. It does not involve Docker. Timings below are from one run with `RAG_QUERY_TIMEOUT_SECONDS=20`.
 
 | Scenario | What we want | Observed | Met? |
 | -------- | ------------ | -------- | ---- |
-| Startup | API healthy; ingest and query work | Healthy in 8.4 s; 16 chunks ingested; vector and hybrid queries returned 200 | Yes |
-| Load: 300 `/query` at concurrency 20, vector | All 200 | All 200; 99 req/s, p50 196 ms, p95 241 ms | Yes |
-| Load: 300 `/query` at concurrency 20, hybrid | All 200 | All 200; 40 req/s, p50 463 ms, p95 750 ms | Yes |
-| LLM provider returns 429 | 429 passed to the caller | 429 after 12.3 s of retries | Yes |
-| LLM provider returns 500 | Clean 5xx | 502 after 12.3 s of retries | Yes |
-| LLM provider hangs | An error within 30 s | **No response within a 30 s client timeout** | **No** |
+| Chroma down when the API first connects | 503 | 503 after 14.8 s | Yes |
+| Startup | API healthy; ingest and query work | Healthy in 9.1 s; 16 chunks ingested; vector and hybrid queries returned 200 | Yes |
+| Load: 300 `/query` at concurrency 20, vector | All 200 | All 200; 37 req/s, p50 513 ms, p95 720 ms | Yes |
+| Load: 300 `/query` at concurrency 20, hybrid | All 200 | All 200; 29 req/s, p50 669 ms, p95 818 ms | Yes |
+| LLM provider returns 429 | 429 passed to the caller | 429 after 7.1 s of retries | Yes |
+| LLM provider returns 500 | Clean 5xx | 502 after 7.1 s of retries | Yes |
+| LLM provider hangs | 504 at the deadline | 504 after 20.0 s | Yes |
 | LLM provider recovers | 200 with no restart | 200 | Yes |
 | Chroma killed: `/healthz` | 200 (process is alive) | 200 | Yes |
-| Chroma killed: `/readyz` | 503 (stop sending traffic) | **200** | **No** |
-| Chroma killed: `/query` | Clean 5xx in a few seconds | 500 after 11.6 s | Yes |
+| Chroma killed: `/readyz` | 503 (stop sending traffic) | 503 in 2.0 s | Yes |
+| Chroma killed: `/query` | 503 | 503 after 11.6 s | Yes |
 | Chroma restarted | 200 with no API restart | 200 after 2.2 s | Yes |
-| API killed and restarted | Chunks intact; hybrid works | 16 chunks before and after; healthy in 7.3 s; hybrid returned 200 | Yes |
-| Async job status after restart | Job still known | **404**; job status is in memory | **No** |
+| API killed and restarted | Chunks intact; hybrid works | 16 chunks before and after; healthy in 9.1 s; hybrid returned 200 | Yes |
+| Async job status after restart | Job still known | 200, status `completed` | Yes |
 | Two replicas: cross-replica ingest | Replica B finds a document ingested through A | Found | Yes |
-| Two replicas: A runs `reset=true` | B keeps working with no restart | **B returned 500** on its next query | **No** |
+| Two replicas: A runs `reset=true` | B keeps working with no restart | 200 | Yes |
+| `MONITOR_ENABLED=true` | `/query` and `/query/stream` work; data reaches OTLP and Langfuse endpoints | Both work; 8 OTLP exports and 4 Langfuse calls to local fakes | Yes |
+
+**Reading the load numbers:** treat them as rough. Run to run they varied widely on this machine: an earlier run of the previous code measured 99 and 40 req/s, while a side-by-side comparison measured 42 and 29 req/s for the previous code and 37 and 28 req/s for the current code. They exclude real LLM, embedding, and reranker time, which should dominate in production.
+
+**The outage timings are slow on this machine:** each refused connection took about 2 s on Windows, and the client retries before giving up. They have not been measured on Linux.
 
 ### Known gaps to close before production
 
-**Deployment blockers**
+**Deployment**
 
-1. **CI never runs.** The workflows trigger on `main`, and the branch is `master`. Once triggered, the CI job would also fail as the code stands: `ruff format --check` flags 3 files and `mypy src/` reports 59 errors.
-2. **`docker compose up` very likely will not start the API.** The Chroma healthcheck calls `/api/v1/heartbeat`, which returned 410 on chromadb 1.5.9 when tested directly (`/api/v2/heartbeat` returned 200), and the `api` service waits for that check to pass. Whether the image contains `curl` has not been checked, and `chromadb/chroma:latest` is unpinned.
-3. **The Docker image has no UI.** The `Dockerfile` does not copy `index.html`, which `GET /` serves, so the UI and dashboard are missing from a container.
+1. **The Docker image and compose stack have not been run.** The known compose problems are fixed (healthcheck, data volume path, UI missing from the image, unpinned Chroma image), but only by inspection and config tests, so expect to find out more on the first real run.
+2. **CI has not run on GitHub yet.** The workflows now trigger on `master`. Each push to `master` will also publish an image to GHCR.
+3. **The image includes the full GPU build of PyTorch** on Linux, adding several GB. CPU-only deployments could install from the PyTorch CPU index instead.
 
 **Reliability**
 
-4. **`/readyz` cannot detect a Chroma outage.** It reuses cached objects, so it returned 200 with Chroma down, and an orchestrator would keep routing traffic to the instance.
-5. **No overall deadline on LLM calls.** A hung provider left a request open past a 30 s client timeout. Each attempt has a 60 s client timeout, and SDK-level and application-level retries apply on top.
-6. **A store reset breaks other replicas.** The replica that did not run the reset returned 500 on its next query. How long that lasts was not measured.
-7. **Async job status is lost on restart** and is not shared between replicas.
-8. **Chroma being unreachable can return 400.** If Chroma is down when the API first connects, `/ingest` and `/query` returned 400, which blames the caller for a server-side outage. An outage after startup returned 500, as it should.
+4. **Timed-out work can keep running.** After a 504, a self-healing or retrieval worker thread continues until its own LLM client timeout ends it, so sustained timeouts can tie up worker threads.
+5. **BM25 staleness is detected by chunk count**, so a same-count replacement ingested through another replica goes unnoticed.
+6. **Async job status needs a shared disk** to be visible across replicas. Two replicas sharing one could also mislabel a job still running on the other as `interrupted`.
 
 **Observability**
 
-9. **OpenTelemetry and Langfuse are not wired into the HTTP service**, and `X-Request-ID` does not reach logs or traces.
-10. **`/stats` counts only the English collection**, so the dashboard's chunk and cache numbers undercount multilingual corpora.
+7. **`X-Request-ID` does not reach logs or traces**, so requests cannot yet be correlated across them.
+8. **`MonitoredRAGPipeline.query_stream` (the older synchronous method) does not work with real LLM streaming.** The HTTP service uses `stream_answer` instead.
 
 **Defaults to change for a real deployment**
 
-11. Auth is off unless `RAG_API_KEY` is set, and CORS defaults to `*`.
+9. Auth is off unless `RAG_API_KEY` is set, and CORS defaults to `*`.
 
 ### Not tested at all
 
+- Linux, including the Docker stack
 - Real LLM, embedding, and reranker latency or cost under load
 - Soak tests, memory growth over time, and traffic beyond the short burst above
 - Corpora beyond 100k chunks (the 1M figures are extrapolations)
 - Disk-full, network partition, and multi-host deployment
 - Backup and restore, index format upgrades, and rollback
+- Real Langfuse and OTLP backends (the drill uses local fakes)
 - Security testing of a deployed instance; the audit notes further down this page are code reviews
 
 ---
@@ -635,14 +653,14 @@ python scripts/evaluate.py --healing-report --hybrid
 python scripts/evaluate.py --self-heal --hybrid --reranker   # standard set with healing on
 ```
 
-The `evaluate.yml` GitHub Actions workflow is written to run this gate on pushes to `main`, a branch this repository does not have, so **it has not run** and no results are published here. The gate keys off faithfulness only; context precision/recall are reported alongside for visibility.
+The `evaluate.yml` GitHub Actions workflow runs this gate on pushes to `master`, and skips it with a notice when the `OPENAI_API_KEY` secret is not set. **It has not run yet**, so no results are published here. The gate keys off faithfulness only; context precision/recall are reported alongside for visibility.
 
 ---
 
 ## Testing
 
 ```bash
-# Full suite (251 tests):
+# Full suite (280 tests):
 python -m pytest tests/ -v
 
 # With coverage report:
@@ -660,6 +678,7 @@ python -m pytest tests/test_monitoring.py -v
 | `test_pipeline.py`            | End-to-end query/ingest flows                                                                     |
 | `test_retrieval.py`           | Vector store, hybrid retriever, BM25 scoring and persistence, RRF, embedding cache, reranker      |
 | `test_vector_store_stress.py` | Scaled ingest, recall, concurrency, deletes, persistence (`RAG_STRESS_*` to scale or use a server) |
+| `test_operations.py`          | Regressions from the failure drill: deployment config, outages, deadlines, job status, replica recovery, monitoring wiring, SDK signatures |
 | `test_ingestion.py`           | Document loading and chunking strategies                                                          |
 | `test_evaluation.py`          | LLM-as-Judge scorer, golden dataset, CI summary                                                   |
 | `test_monitoring.py`          | Tracer spans, MetricsCollector, circuit breaker, guardrails                                       |
@@ -718,7 +737,7 @@ production-grade-rag/
 │   └── utils/
 │       └── i18n.py             # gettext internationalization helpers
 ├── index.html                  # Browser UI and Observability dashboard
-├── tests/                      # 251 pytest tests
+├── tests/                      # 280 pytest tests
 ├── scripts/
 │   ├── ingest.py               # CLI document ingestion
 │   ├── query.py                # CLI query (auto-routes to API if running)
@@ -769,11 +788,11 @@ This project showcases production AI/ML engineering across the full stack:
 | **LLM integration**       | Dual-provider (OpenAI + Anthropic), async streaming, token tracking    |
 | **Information retrieval** | BM25, dense vector search, RRF fusion, cross-encoder reranking         |
 | **API design**            | FastAPI, SSE streaming, auth middleware, readiness probes              |
-| **Observability**         | Prometheus metrics and dashboard; OTel and Langfuse wrapper with a circuit breaker |
+| **Observability**         | Prometheus metrics and dashboard; opt-in OTel and Langfuse tracing with a circuit breaker |
 | **LLM evaluation**        | LLM-as-Judge, faithfulness + relevance metrics, golden dataset CI gate |
 | **Security engineering**  | Auth, path traversal defense, safe file I/O, no pickle                 |
-| **Testing**               | 251 tests, stress test, failure drill, mocking strategy, coverage      |
-| **DevOps / MLOps**        | Docker multi-stage build and GitHub Actions workflows (defined, not yet exercised) |
+| **Testing**               | 280 tests, stress test, failure drill, mocking strategy, coverage      |
+| **DevOps / MLOps**        | Docker multi-stage build and GitHub Actions workflows (not yet exercised end to end) |
 | **Multilingual NLP**      | Language detection, per-language vector collections, i18n prompts      |
 
 

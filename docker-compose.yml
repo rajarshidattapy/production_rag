@@ -1,9 +1,10 @@
 services:
   chroma:
-    image: chromadb/chroma:latest
+    image: chromadb/chroma:1.5.9
     container_name: rag-chromadb
     volumes:
-      - chroma_data:/chroma/chroma
+      # Chroma 1.x persists to /data (see /config.yaml in the image), not /chroma/chroma.
+      - chroma_data:/data
     # No host port mapping: Chroma is reachable only over the internal
     # Docker network (by the `api` service, via RAG_CHROMA_HOST=chroma).
     # A published host port here would expose Chroma's unauthenticated
@@ -16,7 +17,9 @@ services:
       - ANONYMIZED_TELEMETRY=False
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/v1/heartbeat || exit 1"]
+      # The image ships without curl, and /api/v1 returns 410 on Chroma 1.x. Bash's /dev/tcp
+      # needs no extra tools and proves the server is accepting connections.
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8000'"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -32,7 +35,12 @@ services:
     environment:
       - RAG_CHROMA_HOST=chroma
       - RAG_CHROMA_PORT=8000
-      - RAG_LLM_PROVIDER=openai
+      - RAG_LLM_PROVIDER=${RAG_LLM_PROVIDER:-openai}
+      - RAG_LLM_MODEL=${RAG_LLM_MODEL:-gpt-4o-mini}
+      - RAG_OPENROUTER_MODE=${RAG_OPENROUTER_MODE:-auto}
+      - RAG_API_KEY=${RAG_API_KEY:-}
+      - RAG_CORS_ORIGINS=${RAG_CORS_ORIGINS:-*}
+      - MONITOR_ENABLED=${MONITOR_ENABLED:-false}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
     volumes:

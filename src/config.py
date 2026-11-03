@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     # Caps the total characters of retrieved context sent to the LLM, as a
     # cost/runaway-prompt guardrail.
     max_context_chars: int = 12000
+    # Overall limit for one query, across retries and every self-healing attempt.
+    # Each LLM call also has its own client timeout. 0 disables this limit.
+    query_timeout_seconds: float = 180.0
 
     # ---------- Retrieval ----------
     top_k_retrieval: int = 20
@@ -67,7 +70,7 @@ class Settings(BaseSettings):
     bm25_max_index_mb: int = 500  # max BM25 index file; ~1 KB/chunk, so ~2000 for 1M chunks
 
     # ---------- Re-ranker (Phase 2) ----------
-    reranker_model: str = "BAAI/bge-reranker-large"
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
     # ---------- LLM ----------
     # Deliberately uses the conventional, un-prefixed variable so the OpenAI

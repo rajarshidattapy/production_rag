@@ -18,7 +18,6 @@ MODELS_EMBEDDING = [
 
 MODELS_RERANKER = [
     "cross-encoder/ms-marco-MiniLM-L-6-v2",
-    "BAAI/bge-reranker-large",
 ]
 
 

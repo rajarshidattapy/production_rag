@@ -8,7 +8,7 @@ duplicated across ``Generator``, ``FaithfulnessScorer``, and
 from __future__ import annotations
 
 import os
-from typing import Literal
+from typing import Any, Literal
 
 from src.utils.retry import async_retry_with_backoff, retry_with_backoff
 
@@ -77,17 +77,23 @@ class LLMClient:
         self.model = model
         self.timeout = timeout
 
-    def openai_client_kwargs(self) -> dict[str, object]:
+    def openai_client_kwargs(self) -> dict[str, Any]:
         """Connection options for the OpenAI SDK.
 
         The application reads ``OPENAI_API_KEY`` in both cases. Only the base
         URL changes for OpenRouter, so users can switch providers by changing
         ``RAG_LLM_MODEL`` without renaming their key variable.
         """
-        options: dict[str, object] = {}
+        options: dict[str, Any] = {}
         if api_key := _openai_api_key():
             options["api_key"] = api_key
-        if self.provider == "openai" and uses_openrouter(self.model):
+        # An explicit OPENAI_BASE_URL always wins, so a proxy or local endpoint can
+        # never be silently bypassed by the OpenRouter auto-detection.
+        if (
+            self.provider == "openai"
+            and not os.getenv("OPENAI_BASE_URL")
+            and uses_openrouter(self.model)
+        ):
             options["base_url"] = OPENROUTER_BASE_URL
         return options
 
@@ -116,7 +122,7 @@ class LLMClient:
         if self.provider == "openai":
             return self._call_openai(prompt, system, temperature, max_tokens)
         elif self.provider == "anthropic":
-            return self._call_anthropic(prompt, system, temperature, max_tokens)
+            return self._call_anthropic(prompt, system, max_tokens)
         raise ValueError(f"Unsupported LLM provider: {self.provider}")
 
     async def complete_async(
@@ -144,7 +150,7 @@ class LLMClient:
         if self.provider == "openai":
             return await self._call_openai_async(prompt, system, temperature, max_tokens)
         elif self.provider == "anthropic":
-            return await self._call_anthropic_async(prompt, system, temperature, max_tokens)
+            return await self._call_anthropic_async(prompt, system, max_tokens)
         raise ValueError(f"Unsupported LLM provider: {self.provider}")
 
     # ------------------------------------------------------------------
@@ -160,7 +166,7 @@ class LLMClient:
         except ImportError:
             raise ImportError("openai package required. Install with: pip install openai") from None
 
-        client = OpenAI(timeout=self.timeout, **self.openai_client_kwargs())
+        client = OpenAI(timeout=self.timeout, max_retries=0, **self.openai_client_kwargs())
         messages: list[ChatCompletionMessageParam] = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -191,9 +197,7 @@ class LLMClient:
 
         return response.choices[0].message.content or ""
 
-    def _call_anthropic(
-        self, prompt: str, system: str | None, temperature: float, max_tokens: int
-    ) -> str:
+    def _call_anthropic(self, prompt: str, system: str | None, max_tokens: int) -> str:
         try:
             import anthropic
         except ImportError:
@@ -201,14 +205,13 @@ class LLMClient:
                 "anthropic package required. Install with: pip install anthropic"
             ) from None
 
-        client = anthropic.Anthropic(timeout=self.timeout)
+        client = anthropic.Anthropic(timeout=self.timeout, max_retries=0)
 
         def _api_call():
             if system:
                 return client.messages.create(
                     model=self.model,
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=temperature,
                     max_tokens=max_tokens,
                     system=system,
                 )
@@ -216,7 +219,6 @@ class LLMClient:
                 return client.messages.create(
                     model=self.model,
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=temperature,
                     max_tokens=max_tokens,
                 )
 
@@ -246,7 +248,7 @@ class LLMClient:
         except ImportError:
             raise ImportError("openai package required. Install with: pip install openai") from None
 
-        client = AsyncOpenAI(timeout=self.timeout, **self.openai_client_kwargs())
+        client = AsyncOpenAI(timeout=self.timeout, max_retries=0, **self.openai_client_kwargs())
         messages: list[ChatCompletionMessageParam] = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -277,9 +279,7 @@ class LLMClient:
 
         return response.choices[0].message.content or ""
 
-    async def _call_anthropic_async(
-        self, prompt: str, system: str | None, temperature: float, max_tokens: int
-    ) -> str:
+    async def _call_anthropic_async(self, prompt: str, system: str | None, max_tokens: int) -> str:
         try:
             import anthropic
         except ImportError:
@@ -287,14 +287,13 @@ class LLMClient:
                 "anthropic package required. Install with: pip install anthropic"
             ) from None
 
-        client = anthropic.AsyncAnthropic(timeout=self.timeout)
+        client = anthropic.AsyncAnthropic(timeout=self.timeout, max_retries=0)
 
         async def _api_call():
             if system:
                 return await client.messages.create(
                     model=self.model,
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=temperature,
                     max_tokens=max_tokens,
                     system=system,
                 )
@@ -302,7 +301,6 @@ class LLMClient:
                 return await client.messages.create(
                     model=self.model,
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=temperature,
                     max_tokens=max_tokens,
                 )
 

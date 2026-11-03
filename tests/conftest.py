@@ -25,6 +25,14 @@ def isolate_chroma_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
 
 
 @pytest.fixture(autouse=True)
+def disable_monitoring(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the API on the plain pipeline, whatever MONITOR_ENABLED is in a developer's .env."""
+    from src.monitoring.config import settings as monitoring_settings
+
+    monkeypatch.setattr(monitoring_settings, "enabled", False)
+
+
+@pytest.fixture(autouse=True)
 def mock_embedding_function(monkeypatch: pytest.MonkeyPatch) -> None:
     """Mock the embedding function to return dummy vectors, avoiding loading SentenceTransformer."""
     import hashlib
