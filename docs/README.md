@@ -1,8 +1,9 @@
 # Production-Grade RAG Pipeline
 
-![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg) ![ChromaDB 1.5+](https://img.shields.io/badge/chromadb-1.5%2B-blue.svg) ![Pydantic 2.14+](https://img.shields.io/badge/pydantic-2.14%2B-blue.svg) ![Langfuse 2.60+](https://img.shields.io/badge/langfuse-2.60%2B-blue.svg) ![OpenTelemetry 1.30+](https://img.shields.io/badge/opentelemetry-1.30%2B-blue.svg) ![Prometheus client 0.26+](https://img.shields.io/badge/prometheus--client-0.26%2B-blue.svg)
 
 A **Retrieval-Augmented Generation (RAG)** service built with FastAPI, ChromaDB, and OpenAI, OpenRouter, or Anthropic models. It goes from a vector-search baseline to optional hybrid retrieval, optional cross-encoder reranking, optional self-healing, and LLM-as-judge evaluation, with Prometheus metrics always on in the HTTP service and OpenTelemetry and Langfuse instrumentation behind `MONITOR_ENABLED`.
+
 ---
 
 ## High-level overview

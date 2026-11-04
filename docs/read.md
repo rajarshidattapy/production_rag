@@ -4,6 +4,13 @@
 
 
 
+# Haven't scaled yet:
+
+1. **Grafana:** the built-in Observability dashboard covers a single server, so it only becomes necessary with several replicas.
+2. **Redis:** nothing needs a shared cache or shared state yet, because the app runs as one process with an in-memory query cache and no response cache.
+3. **Kafka:** there's no high-volume event stream or multiple consumers, only document jobs that a single in-process queue handles.
+4. **RabbitMQ:** background jobs run in a one-worker queue inside the API process, so it's only worth adding once indexing moves to separate worker services.
+
 ## Optimizing for 20 million docs:
 
 but can't sent to LLM: (cost, latency) - knowledge graph
