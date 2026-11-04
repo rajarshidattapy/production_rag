@@ -49,3 +49,56 @@ Roughly in the order they will hurt. Each says how it was confirmed: *reproduced
 - **The dashboard shows only the replica that answers it.** Use Prometheus and Grafana across replicas. *From the code.*
 - **Chroma is only tested to 50k chunks** on a single node, with its index in memory. Load test it at your target size, and move to Qdrant only if that shows Chroma is the bottleneck. *Measured at 50k; nothing larger has been run.*
 
+## Deploy
+
+The cheapest setup that works is **one VM running Docker Compose**: the API, Chroma, and Caddy for HTTPS, all on the same machine. Expect about $26 to$**30 a month plus your LLM bill**. This setup hasn't been run yet, so check everything on the first deploy.
+
+### What to use
+
+
+| Choice                                                                  | Use                                            | Why                                                                                                        |
+| ----------------------------------------------------------------------- | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| Cloud                                                                   | **Vultr** Regular Cloud Compute, 2 vCPU / 4 GB | Cheapest of the three, and storage and transfer are included                                               |
+| Terraform                                                               | **Skip for now**                               | Creating one VM by hand takes minutes. Add it when you need to rebuild servers or run a second environment |
+| Ansible                                                                 | **Skip for now**                               | A short setup script covers one VM. Add it when you manage several servers                                 |
+| AWS or GCP                                                              | Only if a client requires it                   | Same stack, but they cost more for the same machine (see below)                                            |
+| SageMaker, Kubernetes, load balancer, managed databases, Grafana, Redis | **Skip**                                       | The LLM is an outside API and the local models run on CPU, so one VM needs none of these                   |
+
+
+4 GB is the starting point: the API alone peaked at about 1.2 to 1.4 GB while indexing (measured on Windows), and the reranker and Chroma are on top of that and not yet measured. Check real use with `docker stats`, and move to 8 GB if it gets tight, or if you use the reranker heavily.
+
+### Monthly cost
+
+Prices checked in November 2026, mostly from third-party listings, so confirm them before buying. Storage and transfer are included only where noted.
+
+
+| Option            | Machine                                 | Price     | Catch                                                  |
+| ----------------- | --------------------------------------- | --------- | ------------------------------------------------------ |
+| **Vultr Regular** | 2 vCPU / 4 GB, 80 GB SSD, 3 TB transfer | about $20 | Newer High Performance tier is about $24               |
+| AWS Lightsail     | 2 vCPU / 4 GB, 80 GB SSD, 4 TB transfer | about $24 | Burstable CPU, so long indexing jobs can get throttled |
+| GCP e2-medium     | 2 shared vCPU / 4 GB                    | about $24 | Shared cores; disk and outbound traffic cost extra     |
+| AWS EC2 t3.medium | 2 vCPU / 4 GB                           | about $30 | Burstable CPU; disk and outbound traffic cost extra    |
+
+
+Vultr's automatic backups add 20%, about $4 to$5. A domain is roughly $1 a month (an estimate). The LLM bill is separate and will probably be the part that changes most, so set a spending limit with your provider.
+
+### Change in the repo first
+
+1. **Install CPU-only PyTorch in the Dockerfile.** The image currently pulls the full GPU build, which adds several GB and does nothing on a CPU VM.
+2. **Add Caddy for HTTPS** and stop publishing port 8000, which sends passwords and session cookies unencrypted. In `docker-compose.yml`, remove `ports` from `api`, then add this service and a `caddy_data` entry under `volumes`:
+   ```yaml
+    caddy:
+      image: caddy:2
+      restart: unless-stopped
+      ports: ["80:80", "443:443"]
+      command: caddy reverse-proxy --from rag.example.com --to api:8000
+      volumes: [caddy_data:/data]
+   ```
+3. **Pull the image instead of building on the VM.** Replace `build:` with the image the publish workflow pushes to GHCR. Building on a 4 GB VM is slow, because it downloads PyTorch and the models.
+4. **Give shutdown time to finish** with `stop_grace_period: 90s` on `api`. The Docker default of 10 s can cut off an indexing batch. That's recoverable with Run again, but it's avoidable.
+
+1. 
+2. **Restore a backup once**, so you know it works before you need it.
+
+
+
