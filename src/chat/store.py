@@ -387,9 +387,20 @@ class ChatStore:
             )
         return _chat_summary(row)
 
-    def add_files(self, user_id: str, chat_id: str, filenames: list[str]) -> dict[str, Any] | None:
-        """Record documents added to a chat, with a note in its history."""
+    def add_files(
+        self,
+        user_id: str,
+        chat_id: str,
+        filenames: list[str],
+        note: str | None = None,
+        replacing: list[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Record documents added to a chat, with a note in its history.
+
+        ``replacing`` drops entries an earlier attempt at the same work recorded.
+        """
         now = time.time()
+        note = note or f"Added {', '.join(filenames)} to this chat."
         with self._connect() as conn:
             # Read-modify-write: take the write lock first so concurrent adds can't lose files.
             conn.execute("BEGIN IMMEDIATE")
@@ -398,7 +409,8 @@ class ChatStore:
             ).fetchone()
             if row is None:
                 return None
-            files = list(dict.fromkeys([*json.loads(row["files"]), *filenames]))
+            kept = [f for f in json.loads(row["files"]) if f not in (replacing or [])]
+            files = list(dict.fromkeys([*kept, *filenames]))
             conn.execute(
                 "UPDATE chats SET files = ?, updated_at = ? WHERE id = ?",
                 (json.dumps(files), now, chat_id),
@@ -406,7 +418,7 @@ class ChatStore:
             conn.execute(
                 "INSERT INTO messages (chat_id, role, text, created_at) "
                 "VALUES (?, 'assistant', ?, ?)",
-                (chat_id, f"Added {', '.join(filenames)} to this chat.", now),
+                (chat_id, note, now),
             )
         return self.get_chat(user_id, chat_id)
 

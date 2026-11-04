@@ -136,7 +136,7 @@ def test_ingest_async_job_records_failure(
 ) -> None:
     pipeline = api_app.get_pipeline()
 
-    def boom(source) -> int:
+    def boom(source, **_options) -> int:
         raise ValueError("simulated ingestion failure")
 
     monkeypatch.setattr(pipeline, "ingest", boom)

@@ -564,12 +564,12 @@ class MonitoredRAGPipeline:
         if hasattr(self._pipeline, "set_healing_observer"):
             self._pipeline.set_healing_observer(_HookObserver(self._run_hook))
 
-    def ingest(self, source: Path | str) -> int:
+    def ingest(self, source: Path | str, **options: Any) -> int:
         self._run_hook("on_step_start", "ingest", {"source": str(source)}, {})
 
         start_time = time.monotonic()
         try:
-            res = self._pipeline.ingest(source)
+            res = self._pipeline.ingest(source, **options)
             elapsed = time.monotonic() - start_time
             self._run_hook("on_step_end", "ingest", {"chunks_ingested": res}, elapsed)
             return res

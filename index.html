@@ -9,9 +9,9 @@
 <body><div class="app">
   <aside class="sidebar"><div class="brand">RAG <span>Desk</span></div><button class="new-chat" id="newChat">+ New chat</button>
     <button class="new-chat dash-open" id="openDash" type="button" title="Open the observability dashboard"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M2 14V8M6.5 14V2M11 14V6M14 14H1"/></svg>Observability</button>
-    <div class="notice" id="uploadNotice"></div>
+    <div class="notice" id="uploadNotice"></div><div id="jobs" aria-live="polite"></div>
     <div class="history-label">Your chats</div><nav id="history" aria-label="Chat history"></nav>
-    <div class="side-footer"><details><summary>Retrieval options</summary><div class="options"><label>Top results <input id="topK" type="number" min="1" max="20" value="5"></label><div class="checks"><label><input id="hybrid" type="checkbox"> Hybrid</label><label><input id="reranker" type="checkbox"> Re-rank</label><label><input id="healing" type="checkbox"> Self-heal</label></div></div></details><details style="margin-top:9px"><summary>API access</summary><label class="options">Bearer token<input id="apiKey" type="text" placeholder="Optional"></label></details><div class="notice" id="stats"></div><div class="account"><span id="accountName"></span><button class="link" id="signOut" type="button">Sign out</button></div></div>
+    <div class="side-footer"><details><summary>Retrieval options</summary><div class="options"><label>Top results <input id="topK" type="number" min="1" max="20" value="5"></label><div class="checks"><label><input id="hybrid" type="checkbox"> Hybrid</label><label><input id="reranker" type="checkbox"> Re-rank</label><label><input id="healing" type="checkbox"> Self-heal</label></div></div></details><details style="margin-top:9px"><summary>Server folder</summary><form class="options" id="folderForm"><label>Folder inside the data directory<input id="folderPath" placeholder="data/my-docs" required></label><button class="link" id="indexFolder">Index this folder</button></form></details><details style="margin-top:9px"><summary>API access</summary><label class="options">Bearer token<input id="apiKey" type="text" placeholder="Optional"></label></details><div class="notice" id="stats"></div><div class="account"><span id="accountName"></span><button class="link" id="signOut" type="button">Sign out</button></div></div>
   </aside>
   <main class="workspace"><header class="topbar"><div><div id="chatTitle">New chat</div><div id="chatDocs">No PDFs attached</div></div><div class="status" id="status">Checking server...</div></header><section id="chat" aria-live="polite"></section><div class="composer-wrap"><form id="chatForm"><input id="chatFiles" type="file" accept="application/pdf,.pdf" multiple hidden><button class="attach" id="attachFiles" type="button" title="Add PDFs to this chat" aria-label="Add PDFs to this chat">+</button><input id="question" autocomplete="off" placeholder="Ask anything about your PDFs..." required><button>Send</button></form></div></main>
 </div>
@@ -27,7 +27,8 @@ const $=id=>document.getElementById(id);
 const LEGACY_STORE='rag-desk-chats-v1',DEFAULT_TITLE='New chat',SIGNED_OUT='Please sign in.';
 // Chats live on the server. `messages` is null until a chat is opened. `draft` is a chat
 // that has not been saved yet, so opening "New chat" leaves no empty rows behind.
-let chats=[],activeId=null,draft=null,account=null,authMode='login';
+let chats=[],activeId=null,draft=null,account=null,authMode='login',ingestJobs=[];
+const isIngesting=job=>job.status==='pending'||job.status==='running';
 const apiKey=$('apiKey');
 apiKey.value=$('authKey').value=localStorage.ragApiKey||'';
 function setApiKey(value){apiKey.value=$('authKey').value=value;localStorage.ragApiKey=value}
@@ -82,10 +83,15 @@ function renderHistory(){
   });
 }
 function sourcesNode(citations){const box=document.createElement('details');box.className='sources';const sum=document.createElement('summary');sum.textContent=`Sources (${citations.length})`;box.append(sum);citations.forEach((c,i)=>{const card=document.createElement('details');card.className='source';const head=document.createElement('summary');const num=document.createElement('span');num.className='src-num';num.textContent=i+1;const name=document.createElement('span');name.className='src-name';name.textContent=(c.filename||c.source||'unknown').replace(/^[0-9a-f]{32}_/,'')+(c.page?`, p. ${c.page}`:'');head.append(num,name);if(typeof c.score==='number'){const sc=document.createElement('span');sc.className='src-score';sc.textContent=c.score.toFixed(2);head.append(sc)}const text=(c.text_snippet||'').replace(/\s+/g,' ').trim();const prev=document.createElement('div');prev.className='src-preview';prev.textContent=text.length>180?text.slice(0,180).trimEnd()+'…':text;const full=document.createElement('div');full.className='src-full';full.textContent=text;if(text.endsWith('…')){let loaded=false;card.ontoggle=async()=>{if(!card.open||loaded)return;loaded=true;full.textContent='Loading…';try{full.textContent=(await request(`/chunks/${encodeURIComponent(c.chunk_id)}`,{headers:headers()})).text}catch(error){loaded=false;full.textContent=`${text} (${error.message})`}}}card.append(head,prev,full);box.append(card)});return box}function messageNode(message){const el=document.createElement('div');el.className=`message ${message.role}`;el.textContent=message.text;if(message.citations?.length){el.append(sourcesNode(message.citations))}if(message.healing){const meta=document.createElement('div');meta.className='meta';meta.textContent=`Self-healing: ${message.healing.status}; attempts: ${message.healing.attempts}`;el.append(meta)}return el}
+function docsText(chat){
+  const files=chat.files.join(', ');
+  if(!ingestJobs.some(job=>job.chat_id===chat.id&&isIngesting(job)))return files||'No PDFs attached';
+  return files?`${files} · indexing…`:'Indexing… you can already ask about what has been added';
+}
 function render(){
   const current=active();if(!current)return;
   $('chatTitle').textContent=current.title;
-  $('chatDocs').textContent=current.files.length?current.files.join(', '):'No PDFs attached';
+  $('chatDocs').textContent=docsText(current);
   renderHistory();
   const area=$('chat');area.replaceChildren();
   if(!current.messages){const empty=document.createElement('div');empty.className='empty';empty.textContent='Loading…';area.append(empty)}
@@ -105,7 +111,7 @@ function setAuthMode(mode){
   $('authUser').title=registering?'3 to 64 letters, digits, or . _ @ + -':'';
 }
 function showAuth(message=''){
-  account=null;chats=[];draft=null;activeId=null;
+  account=null;chats=[];draft=null;activeId=null;ingestJobs=[];renderJobs();
   $('history').replaceChildren();$('chat').replaceChildren();
   $('authPass').value='';$('authError').textContent=message;$('auth').hidden=false;$('authUser').focus();
 }
@@ -136,6 +142,7 @@ async function signedIn(user){
   chats=(await request('/chats',{headers:headers()})).map(c=>({...c,messages:null}));
   if(chats[0])openChat(chats[0]);else newChat();
   refreshStats();
+  refreshJobs();
 }
 $('authForm').onsubmit=async event=>{
   event.preventDefault();
@@ -157,40 +164,206 @@ request('/auth/me',{headers:headers()}).then(signedIn).catch(error=>showAuth(err
 </script>
 <script>
   $('attachFiles').onclick = () => $('chatFiles').click();
+  // ---- Background indexing. Jobs live on the server, so they outlast this tab. ----
+  const JOB_POLL_MS = 2000, JOB_SHOWN_MS = 24 * 3600 * 1000, DISMISSED_JOBS = 'ragDismissedJobs';
+  const watchedJobs = new Set();
+  let jobsTimer = null, uploading = null;
+
+  function dismissedJobs() {
+    try { return JSON.parse(localStorage.getItem(DISMISSED_JOBS) || '[]'); } catch { return []; }
+  }
+  function dismissJob(jobId) {
+    localStorage.setItem(DISMISSED_JOBS, JSON.stringify([...dismissedJobs(), jobId].slice(-100)));
+    renderJobs();
+  }
+  function jobStatusText(job) {
+    const done = job.files_done || 0, total = job.files_total || 0, chunks = job.chunks_ingested || 0;
+    switch (job.status) {
+      case 'pending': return job.cancel_requested ? 'Cancelling…' : 'Waiting for its turn';
+      case 'running':
+        if (job.cancel_requested) return 'Stopping after this batch…';
+        return total ? `${done} of ${total} files · ${chunks} new chunks` : 'Starting…';
+      case 'completed': return `Done: ${done - (job.files_failed || 0)} of ${total} files indexed, ${chunks} new chunks`;
+      case 'cancelled': return `Cancelled after ${done} of ${total} files. What was added stays searchable.`;
+      case 'interrupted': return `A server restart stopped this after ${done} of ${total} files.`;
+      default: return job.error || 'Indexing failed.';
+    }
+  }
+  function jobNode({label, text, percent, error, actions = [], failures = [], failed = 0, onDismiss}) {
+    const node = document.createElement('div'), head = document.createElement('div'), name = document.createElement('span');
+    node.className = 'job'; head.className = 'job-head'; name.className = 'job-name';
+    name.textContent = name.title = label;
+    head.append(name);
+    if (onDismiss) {
+      const close = document.createElement('button');
+      close.className = 'job-dismiss'; close.textContent = '×'; close.title = 'Dismiss'; close.setAttribute('aria-label', `Dismiss ${label}`);
+      close.onclick = onDismiss;
+      head.append(close);
+    }
+    const status = document.createElement('div');
+    status.textContent = text;
+    if (error) status.className = 'job-error';
+    node.append(head, status);
+    if (percent !== undefined) {
+      const bar = document.createElement('div'), fill = document.createElement('span');
+      bar.className = `job-bar${percent === null ? ' waiting' : ''}`;
+      if (percent !== null) fill.style.width = `${percent}%`;
+      bar.append(fill);
+      node.append(bar);
+    }
+    if (failed) {
+      const more = document.createElement('details'), summary = document.createElement('summary'), list = document.createElement('ul');
+      summary.textContent = `${failed} could not be indexed`;
+      failures.forEach(item => { const row = document.createElement('li'); row.textContent = `${item.file}: ${item.error}`; list.append(row); });
+      if (failed > failures.length) { const row = document.createElement('li'); row.textContent = `and ${failed - failures.length} more`; list.append(row); }
+      more.append(summary, list);
+      node.append(more);
+    }
+    if (actions.length) {
+      const row = document.createElement('div');
+      row.className = 'job-actions';
+      actions.forEach(([text, onClick]) => { const b = document.createElement('button'); b.className = 'link'; b.type = 'button'; b.textContent = text; b.onclick = onClick; row.append(b); });
+      node.append(row);
+    }
+    return node;
+  }
+  function jobAction(job, verb) {
+    return async () => {
+      try {
+        await postJson(`/ingest/jobs/${job.job_id}/${verb}`, {});
+        if (verb === 'retry') dismissJob(job.job_id);
+      } catch (error) { notice(error.message, true); }
+      refreshJobs();
+    };
+  }
+  function renderJobs() {
+    const host = $('jobs'), nodes = [];
+    if (uploading) nodes.push(jobNode({label: uploading.label, text: `Uploading ${uploading.done + 1} of ${uploading.total}. Keep this tab open until indexing starts.`, percent: Math.round(100 * uploading.done / uploading.total)}));
+    const dismissed = new Set(dismissedJobs());
+    ingestJobs.filter(job => isIngesting(job) || (!dismissed.has(job.job_id) && Date.now() - (job.created_at || 0) * 1000 < JOB_SHOWN_MS)).forEach(job => {
+      const active = isIngesting(job), total = job.files_total || 0;
+      const resumable = ['cancelled', 'interrupted', 'failed'].includes(job.status);
+      nodes.push(jobNode({
+        label: job.label || 'Documents', text: jobStatusText(job), error: job.status === 'failed',
+        percent: active ? (total ? Math.round(100 * (job.files_done || 0) / total) : null) : undefined,
+        failures: job.failures, failed: job.files_failed,
+        actions: [...(active && !job.cancel_requested ? [['Cancel', jobAction(job, 'cancel')]] : []), ...(resumable ? [['Run again', jobAction(job, 'retry')]] : [])],
+        onDismiss: active ? undefined : () => dismissJob(job.job_id),
+      }));
+    });
+    host.replaceChildren(...nodes);
+    const current = active();
+    if (current) $('chatDocs').textContent = docsText(current);
+  }
+  // A finished job has written its result into its chat on the server.
+  async function jobsFinished(finished) {
+    const summaries = await request('/chats', {headers: headers()});
+    for (const job of finished) {
+      const chat = chats.find(c => c.id === job.chat_id), summary = summaries.find(c => c.id === job.chat_id);
+      if (!chat || !summary) continue;
+      Object.assign(chat, summary);
+      if (chat.sending) continue; // an answer is on its way; it would land on a list being replaced
+      chat.messages = null;
+      if (chat === active()) await openChat(chat);
+    }
+    renderHistory();
+    refreshStats();
+  }
+  async function refreshJobs() {
+    clearTimeout(jobsTimer);
+    if (!account) return;
+    try {
+      const jobs = await request('/ingest/jobs', {headers: headers()});
+      if (!account) return;
+      const finished = [];
+      for (const job of jobs) {
+        if (isIngesting(job)) watchedJobs.add(job.job_id);
+        else if (watchedJobs.delete(job.job_id)) finished.push(job);
+      }
+      ingestJobs = jobs;
+      renderJobs();
+      if (finished.length) await jobsFinished(finished);
+    } catch { /* a server restart looks like this; the next poll reports what happened */ }
+    if (account && ingestJobs.some(isIngesting)) jobsTimer = setTimeout(refreshJobs, JOB_POLL_MS);
+  }
+  async function startChatForJob(title) {
+    const name = title.slice(0, 200), chat = await saveDraft({id: null, title: name, files: [], messages: []}, name);
+    if (active() === draft) draft = null;
+    await openChat(chat);
+    return chat;
+  }
+  function warnWhileUploading(event) { event.preventDefault(); }
+
   $('chatFiles').onchange = async () => {
     const files = [...$('chatFiles').files];
     if (!files.length) return;
     const button = $('attachFiles');
     button.disabled = true;
-    const added = [];
+    notice('');
+    const title = files.length === 1 ? files[0].name : `${files.length} PDFs`;
+    const batch = [...crypto.getRandomValues(new Uint8Array(16))].map(b => b.toString(16).padStart(2, '0')).join('');
+    const rejected = [];
+    let directory = null;
+    uploading = {label: title, done: 0, total: files.length};
+    window.addEventListener('beforeunload', warnWhileUploading);
     try {
       for (const file of files) {
-        notice(`Adding ${file.name} to this chat...`);
-        const uploaded = await request(`/upload?filename=${encodeURIComponent(file.name)}`, {
-          method: 'POST', headers: headers('application/pdf'), body: file,
-        });
-        // Never reset here: the document store is shared, so that would delete other users' PDFs.
-        const result = await postJson('/ingest', {source: uploaded.source, reset: false});
-        added.push(file.name);
-        notice(`${file.name}: ${result.chunks_ingested} chunks added.`);
+        renderJobs();
+        try {
+          const uploaded = await request(`/upload?filename=${encodeURIComponent(file.name)}&batch=${batch}`, {
+            method: 'POST', headers: headers('application/pdf'), body: file,
+          });
+          directory = uploaded.directory;
+        } catch (error) {
+          rejected.push(`${file.name}: ${error.message}`);
+        }
+        uploading.done += 1;
       }
-    } catch (error) {
-      notice(error.message, true);
+    } finally {
+      uploading = null;
+      window.removeEventListener('beforeunload', warnWhileUploading);
+      renderJobs();
     }
     try {
-      if (added.length) {
-        const title = added.length === 1 ? added[0] : `${added.length} PDFs`;
-        const chat = await saveDraft({id: null, title, files: [], messages: []}, title);
-        Object.assign(chat, await postJson(`/chats/${chat.id}/files`, {filenames: added}));
-        draft = active() === draft ? null : draft;
-        await openChat(chat);
-        await refreshStats();
+      if (rejected.length) notice(`Not uploaded: ${rejected.join('; ')}`, true);
+      if (directory) {
+        const chat = await startChatForJob(title);
+        // Never reset here: the document store is shared, so that would delete other users' PDFs.
+        await postJson('/ingest/async', {source: directory, label: title, chat_id: chat.id});
+        await refreshJobs();
       }
     } catch (error) {
       notice(error.message, true);
     } finally {
       button.disabled = false;
       $('chatFiles').value = '';
+    }
+  };
+
+  $('folderForm').onsubmit = async event => {
+    event.preventDefault();
+    const source = $('folderPath').value.trim();
+    if (!source) return;
+    const button = $('indexFolder');
+    button.disabled = true;
+    notice('');
+    let chat = null;
+    try {
+      const title = source.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || source;
+      chat = await startChatForJob(title);
+      await postJson('/ingest/async', {source, label: title, chat_id: chat.id});
+      $('folderPath').value = '';
+      await refreshJobs();
+    } catch (error) {
+      notice(error.message, true);
+      // The path was refused, so the chat made for it has nothing to show.
+      if (chat) {
+        await request(`/chats/${chat.id}`, {method: 'DELETE', headers: headers()}).catch(() => {});
+        chats = chats.filter(c => c !== chat);
+        if (chats[0]) openChat(chats[0]); else newChat();
+      }
+    } finally {
+      button.disabled = false;
     }
   };
 </script>
@@ -229,6 +402,7 @@ request('/auth/me',{headers:headers()}).then(signedIn).catch(error=>showAuth(err
     const button = event.currentTarget.querySelector('button:last-child');
     button.disabled = true;
     const typing = showTyping();
+    current.sending = true;
     try {
       await saveDraft(current);
       const result = await postJson(`/chats/${current.id}/messages`, {question, top_k: Number($('topK').value) || 5, use_hybrid: $('hybrid').checked, use_reranker: $('reranker').checked, self_heal: $('healing').checked});
@@ -240,6 +414,7 @@ request('/auth/me',{headers:headers()}).then(signedIn).catch(error=>showAuth(err
       current.messages.push({role: 'assistant', text: `Error: ${error.message}\nThis question was not saved.`, citations: []});
       if (!input.value) input.value = question;
     } finally {
+      current.sending = false;
       typing.remove();
       button.disabled = false;
       render();
@@ -253,6 +428,12 @@ request('/auth/me',{headers:headers()}).then(signedIn).catch(error=>showAuth(err
   .auth #authSubmit { padding:10px 12px; border:0; border-radius:8px; color:#000; background:var(--accent); font:inherit; font-weight:600; cursor:pointer; } .auth #authSubmit:disabled { opacity:.6; } .auth .notice:empty { display:none; }
   .link { padding:0; border:0; color:var(--muted); background:none; font:inherit; text-decoration:underline; cursor:pointer; } .link:hover { color:var(--text); }
   #history { overflow-x:hidden; } .chat-row { min-width:0; } .chat-item { min-width:0; } .chat-name,.chat-files { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #jobs { flex:none; display:grid; gap:6px; max-height:38vh; margin:0 0 8px; overflow:auto; } #jobs:empty { display:none; }
+  .job { display:grid; gap:4px; padding:8px 10px; border:1px solid #2a2a2a; border-radius:8px; background:#0e0e0e; font-size:12px; color:var(--muted); }
+  .job-head { display:flex; align-items:center; gap:6px; color:var(--text); font-weight:600; } .job-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .job-dismiss { padding:0 3px; border:0; color:var(--muted); background:none; cursor:pointer; }
+  .job-bar { height:4px; overflow:hidden; border-radius:2px; background:#262626; } .job-bar span { display:block; height:100%; background:var(--accent); transition:width .3s; } .job-bar.waiting span { width:30%; opacity:.45; }
+  .job-actions { display:flex; gap:10px; } .job details { max-height:120px; overflow:auto; } .job summary { cursor:pointer; } .job li { overflow-wrap:anywhere; } .job ul { margin:4px 0 0; padding-left:16px; } .job-error { color:var(--danger); overflow-wrap:anywhere; }
+  #folderForm { display:grid; gap:6px; } #chatDocs { max-width:60vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .account { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:9px; color:var(--muted); font-size:12px; } .account span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 </style><style>
   /* ---- Observability dashboard (dark; tokens from the dataviz reference palette) ---- */
@@ -384,7 +565,7 @@ request('/auth/me',{headers:headers()}).then(signedIn).catch(error=>showAuth(err
 <script id="obsLib">
   /* Pure helpers (no DOM): Prometheus text parsing and summarising. */
   const Obs = (() => {
-    const SYSTEM_PATHS = new Set(['/metrics', '/stats', '/healthz', '/readyz', '/', '/index.html', '/favicon.ico', '/auth/register', '/auth/login', '/auth/logout', '/auth/me', '/chats', '/chats/import', '/chats/{chat_id}', '/chats/{chat_id}/files', '/chunks/{chunk_id}']);
+    const SYSTEM_PATHS = new Set(['/metrics', '/stats', '/healthz', '/readyz', '/', '/index.html', '/favicon.ico', '/auth/register', '/auth/login', '/auth/logout', '/auth/me', '/chats', '/chats/import', '/chats/{chat_id}', '/chats/{chat_id}/files', '/chunks/{chunk_id}', '/ingest/jobs', '/ingest/jobs/{job_id}', '/ingest/jobs/{job_id}/cancel', '/ingest/jobs/{job_id}/retry']);
     const FRIENDLY = {
       '/chats/{chat_id}/messages': 'Ask a question', '/query': 'Ask a question (API)', '/query/stream': 'Ask a question (streaming)', '/upload': 'Upload a PDF',
       '/ingest': 'Index a document', '/ingest/async': 'Index in the background',

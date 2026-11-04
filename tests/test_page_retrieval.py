@@ -273,7 +273,7 @@ class TestPageSpecificPipeline:
         # Pages come from a Document directly because the helper writes single-line pages.
         doc = DocumentLoader().load(pdf)[0]
         doc.pages = [text, "other page"]
-        with patch.object(p.loader, "load", return_value=[doc]):
+        with patch.object(p.loader, "_load_file", return_value=doc):
             p.ingest(pdf)
 
         with patch.object(p.generator, "generate", side_effect=self._answer) as generate:

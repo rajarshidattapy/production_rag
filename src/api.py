@@ -19,7 +19,9 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
@@ -40,7 +42,7 @@ from src.chat.store import AccountLockedError, ChatStore, User, UsernameTakenErr
 from src.config import settings as _settings
 from src.generation.citations import CitationFormatter
 from src.healing.metrics import HEALING_REGISTRY
-from src.pipeline import RAGPipeline
+from src.pipeline import IngestProgress, RAGPipeline
 from src.retrieval.vector_store import VectorStoreUnavailableError
 from src.utils.i18n import _
 
@@ -96,7 +98,14 @@ async def setup_locale(accept_language: str | None = Header(None)):
         _current_translation.reset(token)
 
 
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    yield
+    _interrupt_active_ingest_jobs()
+
+
 app = FastAPI(
+    lifespan=_lifespan,
     title="Production RAG API",
     version="1.1.0",
     description="HTTP service layer for the Production-Grade RAG pipeline.",
@@ -335,15 +344,28 @@ class IngestResponse(BaseModel):
     total_chunks: int
 
 
+class AsyncIngestRequest(IngestRequest):
+    label: str | None = Field(None, max_length=200, description="Name to show for this job.")
+    chat_id: str | None = Field(
+        None, description="Your chat to note the result in when the job ends. Requires signing in."
+    )
+
+
 class UploadResponse(BaseModel):
     filename: str
     source: str
     size_bytes: int
+    directory: str
 
 
 class IngestJobResponse(BaseModel):
     job_id: str
     status: str
+
+
+class IngestFailure(BaseModel):
+    file: str
+    error: str
 
 
 class IngestJobStatusResponse(BaseModel):
@@ -352,6 +374,14 @@ class IngestJobStatusResponse(BaseModel):
     chunks_ingested: int | None = None
     total_chunks: int | None = None
     error: str | None = None
+    label: str | None = None
+    chat_id: str | None = None
+    created_at: float | None = None
+    files_total: int | None = None
+    files_done: int | None = None
+    files_failed: int | None = None
+    failures: list[IngestFailure] = []
+    cancel_requested: bool = False
 
 
 class QueryRequest(BaseModel):
@@ -501,12 +531,17 @@ def _resolve_ingest_source(source: str) -> Path:
 
 
 @app.post("/upload", response_model=UploadResponse, dependencies=[_auth])
-async def upload_pdf(request: Request, filename: str = Query(..., min_length=1)) -> UploadResponse:
+async def upload_pdf(
+    request: Request,
+    filename: str = Query(..., min_length=1),
+    batch: str | None = Query(None, pattern=r"^[0-9a-f]{32}$"),
+) -> UploadResponse:
     """Save a browser-uploaded PDF under the configured data directory.
 
     Files are intentionally stored inside ``data/uploads`` so the existing
     ingestion guard remains the single authority for allowed source paths.
     The request body is raw PDF bytes, avoiding an extra multipart dependency.
+    Files sent with the same ``batch`` share a directory, which one ingest job can then cover.
     """
     safe_name = Path(filename).name
     if not safe_name.lower().endswith(".pdf"):
@@ -530,6 +565,8 @@ async def upload_pdf(request: Request, filename: str = Query(..., min_length=1))
         )
 
     upload_dir = Path(_settings.data_dir).resolve() / "uploads"
+    if batch:
+        upload_dir = upload_dir / batch
     upload_dir.mkdir(parents=True, exist_ok=True)
     destination = upload_dir / f"{uuid.uuid4().hex}_{safe_name}"
     await asyncio.to_thread(destination.write_bytes, content)
@@ -537,6 +574,7 @@ async def upload_pdf(request: Request, filename: str = Query(..., min_length=1))
         filename=safe_name,
         source=str(destination),
         size_bytes=len(content),
+        directory=str(upload_dir),
     )
 
 
@@ -569,10 +607,23 @@ async def ingest(request: IngestRequest) -> IngestResponse:
 # ---------------------------------------------------------------------------
 _INGEST_JOBS_MAX = 500
 _ingest_jobs: OrderedDict[str, dict[str, Any]] = OrderedDict()
-_background_ingest_tasks: set[asyncio.Task[None]] = set()
+# One at a time, in order: indexing is CPU-bound, so parallel jobs would only slow each other,
+# and a job with reset=True must not run underneath another job.
+_ingest_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rag-ingest")
+# Stop signal for each job this process hasn't finished yet.
+_active_ingest_jobs: dict[str, threading.Event] = {}
+_ingest_jobs_shut_down: set[str] = set()
 # Identifies this process, so a job left unfinished by a previous one can be recognised.
 _INSTANCE_ID = uuid.uuid4().hex
 _ingest_jobs_file_lock = threading.Lock()
+_ingest_jobs_lock = threading.RLock()
+# Rewriting the status file on every batch would add up on a long job.
+_INGEST_PROGRESS_SAVE_SECONDS = 2.0
+_RESUMABLE_JOB_STATUSES = {"cancelled", "interrupted", "failed"}
+_UNFINISHED_JOB_STATUSES = {"pending", "running"}
+# Past this many documents a chat records a count, not every filename.
+_MAX_CHAT_FILE_NAMES = 20
+_UPLOAD_PREFIX_RE = re.compile(r"^[0-9a-f]{32}_")
 
 
 def _ingest_jobs_path() -> Path:
@@ -608,66 +659,247 @@ def _persist_ingest_job(job_id: str, record: dict[str, Any]) -> None:
         logger.warning("Could not save ingest job status: %s", exc)
 
 
-def _record_ingest_job(job_id: str, **fields: Any) -> None:
-    _ingest_jobs[job_id] = {**_ingest_jobs.get(job_id, {}), **fields, "owner": _INSTANCE_ID}
-    _ingest_jobs.move_to_end(job_id)
-    while len(_ingest_jobs) > _INGEST_JOBS_MAX:
-        _ingest_jobs.popitem(last=False)
-    _persist_ingest_job(job_id, _ingest_jobs[job_id])
+def _record_ingest_job(job_id: str, *, persist: bool = True, **fields: Any) -> None:
+    with _ingest_jobs_lock:
+        _ingest_jobs[job_id] = {**_ingest_jobs.get(job_id, {}), **fields, "owner": _INSTANCE_ID}
+        _ingest_jobs.move_to_end(job_id)
+        while len(_ingest_jobs) > _INGEST_JOBS_MAX:
+            _ingest_jobs.popitem(last=False)
+        record = dict(_ingest_jobs[job_id])
+    if persist:
+        _persist_ingest_job(job_id, record)
 
 
-async def _run_ingest_job(job_id: str, source_path: Path, reset: bool) -> None:
-    _record_ingest_job(job_id, status="running")
-    try:
-        pipeline = get_pipeline()
-        if reset:
-            await asyncio.to_thread(pipeline.reset)
-        chunks_ingested = await asyncio.to_thread(pipeline.ingest, source_path)
-        stats = await asyncio.to_thread(pipeline.stats)
-        _record_ingest_job(
-            job_id,
-            status="completed",
-            chunks_ingested=chunks_ingested,
-            total_chunks=stats["chunks_in_store"],
-        )
-    except Exception as exc:
-        logger.warning("Ingest job %s failed: %s", job_id, exc)
-        _record_ingest_job(job_id, status="failed", error=str(exc))
+def _find_ingest_job(job_id: str) -> dict[str, Any] | None:
+    with _ingest_jobs_lock:
+        job = _ingest_jobs.get(job_id)
+    return job or _read_persisted_ingest_jobs().get(job_id)
 
 
-@app.post("/ingest/async", response_model=IngestJobResponse, status_code=202, dependencies=[_auth])
-async def ingest_async(request: IngestRequest) -> IngestJobResponse:
-    """Enqueue ingestion as a background job and return immediately.
-
-    Poll ``GET /ingest/jobs/{job_id}`` for status. Path validation happens
-    synchronously before the job is created, so a bad path still fails fast
-    with a 400 rather than surfacing as an async job failure.
-    """
-    source_path = _resolve_ingest_source(request.source)
-
-    job_id = str(uuid.uuid4())
-    _record_ingest_job(job_id, status="pending")
-
-    task = asyncio.create_task(_run_ingest_job(job_id, source_path, request.reset))
-    _background_ingest_tasks.add(task)
-    task.add_done_callback(_background_ingest_tasks.discard)
-
-    return IngestJobResponse(job_id=job_id, status="pending")
-
-
-@app.get("/ingest/jobs/{job_id}", response_model=IngestJobStatusResponse, dependencies=[_auth])
-def get_ingest_job(job_id: str) -> IngestJobStatusResponse:
-    """Return the current status of an async ingestion job."""
-    job = _ingest_jobs.get(job_id) or _read_persisted_ingest_jobs().get(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="No ingest job found with that ID.")
-    if job.get("status") in ("pending", "running") and job.get("owner") != _INSTANCE_ID:
+def _ingest_job_view(job_id: str, job: dict[str, Any]) -> IngestJobStatusResponse:
+    """A job as clients see it: internal fields dropped, and orphaned work called what it is."""
+    if job.get("status") in _UNFINISHED_JOB_STATUSES and job.get("owner") != _INSTANCE_ID:
         job = {
             **job,
             "status": "interrupted",
             "error": "The server restarted before this job finished.",
         }
-    return IngestJobStatusResponse(job_id=job_id, **{k: v for k, v in job.items() if k != "owner"})
+    return IngestJobStatusResponse(
+        job_id=job_id, **{k: v for k, v in job.items() if k not in ("owner", "user_id", "source")}
+    )
+
+
+def _progress_fields(progress: IngestProgress) -> dict[str, Any]:
+    return {
+        "files_total": progress.files_total,
+        "files_done": progress.files_done,
+        "files_failed": progress.files_failed,
+        "chunks_ingested": progress.chunks_ingested,
+        "failures": progress.failures,
+    }
+
+
+def _ingest_chat_note(
+    status: str, progress: IngestProgress, label: str | None
+) -> tuple[list[str], str]:
+    """Return the documents to list on the chat and the note to add to its history."""
+    count = progress.files_indexed
+    names = sorted(_UPLOAD_PREFIX_RE.sub("", name) for name in progress.indexed_names)
+    if count > _MAX_CHAT_FILE_NAMES:
+        files, added = [f"{count} documents"], f"{count} documents"
+    else:
+        files, added = names, ", ".join(names)
+
+    parts = [f"Added {added} to this chat."] if count else []
+    if progress.files_failed:
+        parts.append(f"{progress.files_failed} of {progress.files_total} could not be indexed.")
+    if status == "cancelled":
+        parts.append(f"Indexing was cancelled after {progress.files_done} files.")
+    elif status == "failed":
+        parts.append(f"Indexing stopped with an error after {progress.files_done} files.")
+    return files, " ".join(parts) or f"No documents were found in {label or 'that location'}."
+
+
+def _note_ingest_result_in_chat(job_id: str, status: str, progress: IngestProgress) -> None:
+    """Tell the chat how the job ended, so the result is there even if the tab was closed."""
+    with _ingest_jobs_lock:
+        job = dict(_ingest_jobs.get(job_id, {}))
+    if not job.get("chat_id") or status == "interrupted":
+        return  # an interrupted job is expected to be run again
+    try:
+        files, note = _ingest_chat_note(status, progress, job.get("label"))
+        get_chat_store().add_files(
+            job["user_id"],
+            job["chat_id"],
+            files,
+            note=note,
+            replacing=job.get("replaces_chat_files"),
+        )
+        _record_ingest_job(job_id, persist=False, chat_files=files)
+    except Exception:
+        logger.exception("Could not note ingest job %s in its chat", job_id)
+
+
+def _run_ingest_job(job_id: str, source_path: Path, reset: bool) -> None:
+    stop = _active_ingest_jobs[job_id]
+    latest = IngestProgress()
+    last_saved = 0.0
+
+    def on_progress(progress: IngestProgress) -> None:
+        nonlocal latest, last_saved
+        latest = progress
+        now = time.monotonic()
+        save = now - last_saved >= _INGEST_PROGRESS_SAVE_SECONDS
+        if save:
+            last_saved = now
+        _record_ingest_job(job_id, persist=save, **_progress_fields(progress))
+
+    def stopped_status() -> str:
+        return "interrupted" if job_id in _ingest_jobs_shut_down else "cancelled"
+
+    try:
+        if stop.is_set():  # cancelled while waiting its turn
+            status = stopped_status()
+            _note_ingest_result_in_chat(job_id, status, latest)
+            _record_ingest_job(job_id, status=status)
+            return
+
+        _record_ingest_job(job_id, status="running")
+        pipeline = get_pipeline()
+        if reset:
+            pipeline.reset()
+        chunks_ingested = pipeline.ingest(
+            source_path, on_progress=on_progress, should_stop=stop.is_set
+        )
+        total_chunks = pipeline.stats()["chunks_in_store"]
+        status = stopped_status() if latest.stopped else "completed"
+        # The note goes first: whoever sees the job end expects to find it in the chat.
+        _note_ingest_result_in_chat(job_id, status, latest)
+        _record_ingest_job(
+            job_id,
+            status=status,
+            total_chunks=total_chunks,
+            **{**_progress_fields(latest), "chunks_ingested": chunks_ingested},
+        )
+    except Exception as exc:
+        logger.warning("Ingest job %s failed: %s", job_id, exc)
+        _note_ingest_result_in_chat(job_id, "failed", latest)
+        _record_ingest_job(job_id, status="failed", error=str(exc), **_progress_fields(latest))
+    finally:
+        _active_ingest_jobs.pop(job_id, None)
+        _ingest_jobs_shut_down.discard(job_id)
+
+
+def _enqueue_ingest_job(source_path: Path, reset: bool = False, **fields: Any) -> str:
+    job_id = str(uuid.uuid4())
+    _active_ingest_jobs[job_id] = threading.Event()
+    _record_ingest_job(
+        job_id, status="pending", source=str(source_path), created_at=time.time(), **fields
+    )
+    _ingest_worker.submit(_run_ingest_job, job_id, source_path, reset)
+    return job_id
+
+
+def _interrupt_active_ingest_jobs() -> None:
+    """Called at shutdown: stop promptly, so exit doesn't wait for a long job to finish."""
+    for job_id, stop in list(_active_ingest_jobs.items()):
+        _ingest_jobs_shut_down.add(job_id)
+        stop.set()
+
+
+def _user_for_session(rag_session: str | None) -> User | None:
+    return get_chat_store().user_for_session(rag_session) if rag_session else None
+
+
+def _job_for_requester(job_id: str, rag_session: str | None) -> dict[str, Any]:
+    """Find a job this caller may act on. A signed-in user's job belongs to that user alone."""
+    job = _find_ingest_job(job_id)
+    if job is not None and job.get("user_id"):
+        user = _user_for_session(rag_session)
+        if user is None or user.id != job["user_id"]:
+            job = None
+    if job is None:
+        raise HTTPException(status_code=404, detail="No ingest job found with that ID.")
+    return job
+
+
+@app.post("/ingest/async", response_model=IngestJobResponse, status_code=202, dependencies=[_auth])
+async def ingest_async(
+    request: AsyncIngestRequest, rag_session: str | None = Cookie(None)
+) -> IngestJobResponse:
+    """Enqueue ingestion as a background job and return immediately.
+
+    Poll ``GET /ingest/jobs/{job_id}`` for status. Path validation happens
+    synchronously before the job is created, so a bad path still fails fast
+    with a 400 rather than surfacing as an async job failure. Jobs run one at a
+    time in the order they arrive. Text is searchable as each batch is stored.
+    """
+    source_path = _resolve_ingest_source(request.source)
+
+    user = await asyncio.to_thread(_user_for_session, rag_session)
+    if request.chat_id:
+        if user is None:
+            raise HTTPException(status_code=401, detail="Please sign in.")
+        store = get_chat_store()
+        if not await asyncio.to_thread(store.chat_exists, user.id, request.chat_id):
+            raise HTTPException(status_code=404, detail="No chat found with that ID.")
+
+    job_id = await asyncio.to_thread(
+        _enqueue_ingest_job,
+        source_path,
+        reset=request.reset,
+        label=request.label or source_path.name,
+        user_id=user.id if user else None,
+        chat_id=request.chat_id,
+    )
+    return IngestJobResponse(job_id=job_id, status="pending")
+
+
+@app.get("/ingest/jobs/{job_id}", response_model=IngestJobStatusResponse, dependencies=[_auth])
+def get_ingest_job(job_id: str, rag_session: str | None = Cookie(None)) -> IngestJobStatusResponse:
+    """Return the current status of an async ingestion job."""
+    return _ingest_job_view(job_id, _job_for_requester(job_id, rag_session))
+
+
+@app.post(
+    "/ingest/jobs/{job_id}/cancel",
+    response_model=IngestJobStatusResponse,
+    dependencies=[_auth],
+)
+def cancel_ingest_job(
+    job_id: str, rag_session: str | None = Cookie(None)
+) -> IngestJobStatusResponse:
+    """Stop a job after its current batch. Text already indexed stays searchable."""
+    job = _job_for_requester(job_id, rag_session)
+    stop = _active_ingest_jobs.get(job_id)
+    if stop is None or job.get("status") not in _UNFINISHED_JOB_STATUSES:
+        raise HTTPException(status_code=409, detail="This job is not running on this server.")
+    stop.set()
+    _record_ingest_job(job_id, cancel_requested=True)
+    return _ingest_job_view(job_id, {**job, "cancel_requested": True})
+
+
+@app.post(
+    "/ingest/jobs/{job_id}/retry",
+    response_model=IngestJobResponse,
+    status_code=202,
+    dependencies=[_auth],
+)
+def retry_ingest_job(job_id: str, rag_session: str | None = Cookie(None)) -> IngestJobResponse:
+    """Run a job that didn't finish again. Text already indexed is skipped, not embedded twice."""
+    job = _job_for_requester(job_id, rag_session)
+    if _ingest_job_view(job_id, job).status not in _RESUMABLE_JOB_STATUSES:
+        raise HTTPException(status_code=409, detail="Only a job that didn't finish can be rerun.")
+    new_id = _enqueue_ingest_job(
+        _resolve_ingest_source(job["source"]),
+        label=job.get("label"),
+        user_id=job.get("user_id"),
+        chat_id=job.get("chat_id"),
+        # A re-run covers the whole source again, so its result replaces the earlier one. An
+        # interrupted attempt recorded nothing, so what it was going to replace passes along.
+        replaces_chat_files=job.get("chat_files") or job.get("replaces_chat_files"),
+    )
+    return IngestJobResponse(job_id=new_id, status="pending")
 
 
 @app.post(
@@ -908,6 +1140,16 @@ def logout(response: Response, rag_session: str | None = Cookie(None)) -> None:
 @app.get("/auth/me", response_model=AccountResponse, dependencies=[_auth])
 def me(user: User = _signed_in) -> AccountResponse:
     return AccountResponse(username=user.username)
+
+
+@app.get("/ingest/jobs", response_model=list[IngestJobStatusResponse], dependencies=[_auth])
+def list_ingest_jobs(user: User = _signed_in) -> list[IngestJobStatusResponse]:
+    """List your most recent ingest jobs, newest first, including any cut off by a restart."""
+    with _ingest_jobs_lock:
+        jobs = {**_read_persisted_ingest_jobs(), **_ingest_jobs}
+    mine = [(i, j) for i, j in jobs.items() if j.get("user_id") == user.id]
+    mine.sort(key=lambda item: item[1].get("created_at") or 0, reverse=True)
+    return [_ingest_job_view(i, j) for i, j in mine[:50]]
 
 
 @app.get("/chats", response_model=list[ChatSummary], dependencies=[_auth])

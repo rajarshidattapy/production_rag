@@ -71,7 +71,7 @@ Hybrid search, reranking, and self-healing are three independent switches, all o
 
 | Entry point | Accepted input | Notes |
 | ----------- | -------------- | ----- |
-| Browser UI, `POST /upload` | **PDF only** | Checks the `.pdf` extension (not the file contents) and `RAG_MAX_FILE_SIZE_MB`, then saves under `data/uploads`. The UI then calls `/ingest` on the saved file. |
+| Browser UI, `POST /upload` | **PDF only** | Checks the `.pdf` extension (not the file contents) and `RAG_MAX_FILE_SIZE_MB`, then saves under `data/uploads`. The UI then indexes the files in a background job. |
 | `POST /ingest`, `POST /ingest/async` | PDF, TXT, MD, JSON | Takes a file or directory path that must be inside `RAG_DATA_DIR`. The file must already be on the server. |
 | `scripts/ingest.py` | PDF, TXT, MD, JSON | Local CLI. Routes to a running API server when there is one. |
 
@@ -94,6 +94,31 @@ PDFs are chunked one page at a time, and each chunk records its `page` (the phys
 - **Every PDF:** "Page 1" matches page 1 of every PDF in the store. Citations name the file and page, but a question can't yet pick one document.
 - **Page breaks:** Chunks don't cross pages, so a sentence split by a page break is split in the index too.
 - **No page metadata:** If nothing in the store has page metadata, page references are ignored and retrieval works as usual. PDFs indexed before this feature need re-ingesting, with `reset` so the old chunks are removed.
+
+### Background indexing
+
+Attaching PDFs or choosing a folder under **Server folder** in the UI starts a background job, shown live in the sidebar. Indexing carries on if the tab is closed, and the result is written into the chat that started it.
+
+- **Streaming:** Files are processed one at a time and stored in batches of 256 chunks, so the collection's text is never all in memory at once. The vector index still grows with the collection. Text is searchable as soon as its batch is stored, including while the job is running.
+- **Bad files:** A file that can't be read, or a PDF with no extractable text, is listed on the job and skipped. The rest of the collection still gets indexed.
+- **Cancel:** Stops after the current batch, which can take about a minute on a CPU. Text already indexed stays searchable.
+- **Run again:** Available on a cancelled, failed, or interrupted job. Chunks already stored are skipped, so it resumes rather than re-embedding everything. It reads every file again to find what's missing.
+- **Restarts:** A graceful shutdown waits for the current batch, so a container manager's stop timeout may end it first, which counts as a crash. After a restart or crash the job is reported as `interrupted`. A crash loses at most the chunks still waiting for their batch, and **Run again** restores them.
+- **Queue:** Each server process runs one job at a time, in order, because indexing is CPU-bound. Questions keep working meanwhile.
+- **Uploads:** Files go to the server one at a time before the job starts, so keep the tab open until the job appears. For a very large collection, put the files on the server and use **Server folder**. The path must be inside `RAG_DATA_DIR`.
+- **Visibility:** A job started while signed in belongs to that user. `GET /ingest/jobs` lists only your own jobs, and other users get `404` for them. The documents themselves still go into the shared store.
+
+Measured on one CPU machine with PyTorch limited to one thread (the default), 2,000 text files, 8,000 chunks, and the real embedding model, against the previous load-everything-first code:
+
+| | Previous | Background job |
+| - | -------- | -------------- |
+| Time to index | 2,029 s | 1,965 s |
+| First text searchable | at the end | about 68 s |
+| Peak memory growth during ingest | 198 MB | 155 MB |
+| Peak memory growth, 40,000 chunks, stub embeddings | 335 MB | 217 MB |
+| Time to index, 40,000 chunks, stub embeddings | 360 s | 551 s |
+
+The stub rows remove embedding cost to expose the pipeline's own overhead: smaller batches and the check for stored chunks add time that the CPU model's cost hides, and that faster hardware would make more noticeable. During the job, `/query` retrieval (with a stubbed LLM) stayed at p50 26 ms and p95 45 ms, against 20 ms and 33 ms idle, with a worst case of 372 ms. **Embedding is the bottleneck at about 4 chunks per second**, so a million chunks would take roughly 70 hours on this setup. That figure is extrapolated, not run.
 
 ### Accounts and chat history
 
@@ -184,7 +209,7 @@ Citation support is a word-overlap heuristic, so it can catch a misattributed ci
 - **Cross-Encoder Reranking (opt-in)** — Reorders retrieved chunks before generation, on either vector or hybrid results. Enable with `"use_reranker": true`. The default model is `cross-encoder/ms-marco-MiniLM-L-6-v2`, chosen for its small size (about 80 MB) because reranking runs on one CPU thread. It was trained on English; for German or Spanish corpora, consider setting `RAG_RERANKER_MODEL=BAAI/bge-reranker-v2-m3`.
 - **Multilingual Routing** — `langdetect` runs per chunk at ingest and per query, routing to per-language ChromaDB collections (en/de/es; anything else falls back to `en`), with prompts translated via gettext. A query searches only its detected language's collection, so a German question will not find English documents.
 - **SSE Token Streaming** — `/query/stream` endpoint delivers tokens over Server-Sent Events as they are generated; compatible with any EventSource client.
-- **Async Ingestion** — `POST /ingest/async` enqueues ingestion as a background job and returns a `job_id` immediately (202), avoiding client/proxy timeouts on large corpora; poll `GET /ingest/jobs/{job_id}` for status. Job status is saved to `data/ingest_jobs.json`, so it survives a restart; a job cut off by a restart reports `interrupted`. It is shared between replicas only if they share that disk.
+- **Background Ingestion** — `POST /ingest/async` queues a job and returns a `job_id` immediately (202). Jobs stream through a collection a batch at a time, report progress and per-file failures, and can be cancelled or resumed. The UI shows them live. See [Background indexing](#background-indexing).
 - **LLM Backends** — OpenAI or Anthropic via `RAG_LLM_PROVIDER`, chosen at startup, with streaming for both. Provider-qualified model names or an `sk-or-` key route the OpenAI client to OpenRouter (`RAG_OPENROUTER_MODE` overrides this).
 - **Optional API Key Auth** — Set `RAG_API_KEY` to require `Authorization: Bearer <key>` on every route except `/healthz` and the UI page. Auth is off when the variable is unset, which is the default.
 - **Prometheus Metrics and Dashboard** — `/metrics` exposes per-route request counts and latency plus self-healing counters. The UI's Observability button shows them as a dashboard.
@@ -195,7 +220,7 @@ Citation support is a word-overlap heuristic, so it can catch a misattributed ci
 - **Context Budget** — `RAG_MAX_CONTEXT_CHARS` (default 12000) caps the context sent to the LLM as a cost guardrail. Passages past the budget are dropped, and the last one that fits is cut at the character limit, which can be mid-sentence.
 - **Security Hardening** — Path-traversal guards on `/ingest`, BM25 index stored as plain integer arrays loaded with `allow_pickle=False` (no pickle), 0o600 file permissions on data files, `re.escape()` on pricing pattern matching to prevent ReDoS.
 - **Docker Multi-Stage Build** — `deps → model-cache → runtime` stages; non-root user, with the default embedding and reranker models cached in the image. The image and compose stack have not been run end to end yet; see [known gaps](#known-gaps-to-close-before-production).
-- **Tests and CI** — 446 unit, integration, and stress tests (LLM calls mocked; no API keys needed). GitHub Actions workflows cover CI, the evaluation gate (skipped when the `OPENAI_API_KEY` secret is absent), and GHCR publish on every push to `master`.
+- **Tests and CI** — 501 unit, integration, and stress tests (LLM calls mocked; no API keys needed). GitHub Actions workflows cover CI, the evaluation gate (skipped when the `OPENAI_API_KEY` secret is absent), and GHCR publish on every push to `master`.
 
 ---
 
@@ -272,8 +297,11 @@ uvicorn src.api:app --reload --host 0.0.0.0 --port 8000
 | `GET`  | `/chunks/{chunk_id}`    | Full text of a cited passage (`404` once it has left the store)                                        |
 | `POST` | `/upload`               | Save a browser-uploaded **PDF** under `data/uploads` (does not index it; call `/ingest` next)          |
 | `POST` | `/ingest`               | Ingest PDF, TXT, MD, or JSON from a path inside the data directory (blocks until done)                 |
-| `POST` | `/ingest/async`         | Enqueue ingestion as a background job; returns `job_id` immediately (202)                              |
-| `GET`  | `/ingest/jobs/{job_id}` | Poll status of an async ingestion job                                                                  |
+| `POST` | `/ingest/async`         | Queue ingestion as a background job; returns `job_id` immediately (202). Optional `label` and `chat_id` |
+| `GET`  | `/ingest/jobs`          | Your most recent jobs, newest first (requires signing in)                                              |
+| `GET`  | `/ingest/jobs/{job_id}` | Status of a job: progress, chunks added, and files that failed                                         |
+| `POST` | `/ingest/jobs/{job_id}/cancel` | Stop a queued or running job after its current batch (`409` once it has ended)                  |
+| `POST` | `/ingest/jobs/{job_id}/retry`  | Run a cancelled, failed, or interrupted job again, skipping chunks already stored               |
 | `POST` | `/query`                | Synchronous Q&amp;A — returns answer + citations                                                       |
 | `POST` | `/query/stream`         | **SSE streaming** — streams tokens then citations                                                      |
 
@@ -665,6 +693,12 @@ The drill uses real API and Chroma server processes on loopback, a local fake LL
 
 7. **`X-Request-ID` does not reach logs or traces**, so requests cannot yet be correlated across them.
 8. **`MonitoredRAGPipeline.query_stream` (the older synchronous method) does not work with real LLM streaming.** The HTTP service uses `stream_answer` instead.
+
+**Background indexing**
+
+- **Run again reads every file.** It skips embedding stored chunks, but loading and chunking a large collection again still takes time.
+- **Each replica has its own job queue**, so jobs on different replicas run at the same time. Cancelling only works on the replica running the job.
+- **Scanned PDFs are not indexed.** They are reported as having no extractable text; there is no OCR.
 
 **Accounts**
 

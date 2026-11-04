@@ -6,6 +6,7 @@ import contextvars
 import gettext
 import logging
 from collections.abc import AsyncGenerator, Awaitable, Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -18,7 +19,7 @@ if TYPE_CHECKING:
 from src.config import settings
 from src.generation.citations import Citation, CitationFormatter
 from src.generation.generator import Generator
-from src.ingestion.chunker import Chunker
+from src.ingestion.chunker import Chunk, Chunker
 from src.ingestion.loader import DocumentLoader
 from src.retrieval.vector_store import VectorStore
 from src.utils.page_query import page_filter
@@ -27,11 +28,44 @@ logger = logging.getLogger(__name__)
 
 _SUPPORTED_LANGUAGES: frozenset[str] = frozenset(["en", "de", "es"])
 
+# Chunks embedded and stored per step of an ingest. It sets how soon new text is searchable,
+# how often progress moves, and how long a request to stop can take to be noticed.
+_INGEST_STEP_CHUNKS = 256
+# A collection can have many thousands of files; a progress report only needs a sample.
+_MAX_LISTED_FILES = 100
+
+
+@dataclass
+class IngestProgress:
+    """Running totals for one ingest. ``files_done`` includes files that could not be read."""
+
+    files_total: int = 0
+    files_done: int = 0
+    files_indexed: int = 0
+    files_failed: int = 0
+    chunks_ingested: int = 0
+    stopped: bool = False
+    indexed_names: list[str] = field(default_factory=list)
+    failures: list[dict[str, str]] = field(default_factory=list)
+
+    def add_indexed(self, name: str) -> None:
+        self.files_indexed += 1
+        if len(self.indexed_names) < _MAX_LISTED_FILES:
+            self.indexed_names.append(name)
+
+    def add_failure(self, name: str, error: str) -> None:
+        self.files_failed += 1
+        if len(self.failures) < _MAX_LISTED_FILES:
+            self.failures.append({"file": name, "error": error})
+
 
 def _detect_language(text: str) -> str:
     """Detect language of text, falling back to 'en' for unsupported languages."""
-    from langdetect import LangDetectException, detect
+    from langdetect import DetectorFactory, LangDetectException, detect
 
+    # Detection is randomized by default. Text has to route the same way every time, or
+    # re-running an ingest would store a chunk again in a second language's collection.
+    DetectorFactory.seed = 0
     try:
         lang = detect(text)
     except LangDetectException:
@@ -135,37 +169,99 @@ class RAGPipeline:
     # Ingestion
     # ------------------------------------------------------------------
 
-    def ingest(self, source: Path | str) -> int:
+    def ingest(
+        self,
+        source: Path | str,
+        on_progress: Callable[[IngestProgress], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> int:
         """Load, chunk, and index documents from a file or directory.
 
         Automatically detects document chunk language and routes to the matching collection.
 
+        Works through a directory one file at a time, holding only a small buffer of chunks,
+        so the collection's text is never all in memory and text is searchable as soon as its
+        batch is stored. A file that can't be read is recorded and skipped, except when it
+        is the only file requested, where the error is raised. Chunks already stored are
+        skipped, so running an interrupted ingest again resumes it instead of redoing the work.
+
         Args:
             source: Path to a file or directory.
+            on_progress: Called with running totals as the work advances.
+            should_stop: Checked between batches. When true, chunks stored so far stay.
 
         Returns:
-            Number of chunks ingested.
+            Number of chunks newly added.
         """
-        docs = self.loader.load(source)
-        chunks = self.chunker.chunk_many(docs)
+        files = self.loader.list_files(source)
+        root = Path(source).resolve()
+        progress = IngestProgress(files_total=len(files))
+        stop = should_stop or (lambda: False)
+        report = (lambda: on_progress(progress)) if on_progress else (lambda: None)
+        pending: dict[str, list[Chunk]] = {}
+        report()
 
-        chunks_by_lang: dict[str, list[Any]] = {}
-        for chunk in chunks:
-            lang = _detect_language(chunk.content)
-            chunks_by_lang.setdefault(lang, []).append(chunk)
+        for path in files:
+            if stop():
+                progress.stopped = True
+                break
+            name = path.name if path == root else str(path.relative_to(root))
+            try:
+                chunks = self.chunker.chunk(self.loader._load_file(path))
+            except Exception as exc:
+                if path == root:
+                    raise
+                logger.exception("Failed to load %s, skipping", path)
+                progress.add_failure(name, str(exc))
+            else:
+                if not chunks:
+                    progress.add_failure(name, "No extractable text (it may be a scanned image).")
+                for chunk in chunks:
+                    pending.setdefault(_detect_language(chunk.content), []).append(chunk)
+                self._store_pending(pending, progress, report, _INGEST_STEP_CHUNKS, stop)
+                if progress.stopped:
+                    # Stopped partway through a long file: it will be finished by a re-run.
+                    pending.clear()
+                    break
+                if chunks:
+                    progress.add_indexed(name)
+            progress.files_done += 1
+            report()
 
-        total_count = 0
-        for lang, lang_chunks in chunks_by_lang.items():
-            vs = self._get_vector_store(lang)
-            count = vs.add_chunks(lang_chunks)
-            total_count += count
+        self._store_pending(pending, progress, report, 1)
+        logger.info("Ingested %d chunks from %s", progress.chunks_ingested, source)
+        return progress.chunks_ingested
 
-            # Keep the corresponding hybrid index current (appends; falls back to a rebuild)
-            if lang in self._hybrid_retrievers:
-                self._hybrid_retrievers[lang].add_chunks(lang_chunks)
+    def _store_pending(
+        self,
+        pending: dict[str, list[Chunk]],
+        progress: IngestProgress,
+        report: Callable[[], None],
+        at_least: int,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> None:
+        """Store buffered chunks one step at a time while a language has ``at_least`` waiting."""
+        for lang, chunks in pending.items():
+            while len(chunks) >= at_least:
+                step = chunks[:_INGEST_STEP_CHUNKS]
+                del chunks[:_INGEST_STEP_CHUNKS]
+                progress.chunks_ingested += self._store_chunks(lang, step)
+                report()
+                if should_stop is not None and should_stop():
+                    progress.stopped = True
+                    return
 
-        logger.info("Ingested %d chunks from %s", total_count, source)
-        return total_count
+    def _store_chunks(self, lang: str, chunks: list[Chunk]) -> int:
+        vs = self._get_vector_store(lang)
+        known = vs.existing_ids([c.chunk_id for c in chunks])
+        fresh = [c for c in chunks if c.chunk_id not in known]
+        if not fresh:
+            return 0
+        count = vs.add_chunks(fresh)
+        # Keep the corresponding hybrid index current (appends; falls back to a rebuild)
+        if lang in self._hybrid_retrievers:
+            self._hybrid_retrievers[lang].add_chunks(fresh)
+        return count
 
     # ------------------------------------------------------------------
     # Query

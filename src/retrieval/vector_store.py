@@ -318,6 +318,18 @@ class VectorStore:
                 return ids
             offset += len(page)
 
+    def existing_ids(self, ids: list[str], batch_size: int = 500) -> set[str]:
+        """Return which of ``ids`` are already stored."""
+        found: set[str] = set()
+        for start in range(0, len(ids), batch_size):
+            batch = ids[start : start + batch_size]
+
+            def _get(collection: Any, _b: list[str] = batch):
+                return collection.get(ids=_b, include=[])
+
+            found.update(self._collection_call(_get).get("ids") or [])
+        return found
+
     def has_paged_chunks(self) -> bool:
         """Whether any chunk records the page it came from."""
 

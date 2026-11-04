@@ -28,6 +28,8 @@ class DocumentLoader:
     """
 
     SUPPORTED_EXTENSIONS: set[str] = {".txt", ".md", ".pdf", ".json"}
+    # The service's own bookkeeping in the data directory is not a document.
+    EXCLUDED_NAMES: set[str] = {"ingest_jobs.json"}
 
     def __init__(
         self,
@@ -41,6 +43,23 @@ class DocumentLoader:
         self.max_file_size_bytes = int(max_file_size_mb * 1024 * 1024)
         self.max_pdf_pages = max_pdf_pages
 
+    def list_files(self, source: Path | str) -> list[Path]:
+        """Return the files ``source`` covers: itself, or a directory's supported files."""
+        source_path = Path(source).resolve()
+        if not source_path.exists():
+            raise FileNotFoundError(f"Source does not exist: {source_path}")
+        if source_path.is_file():
+            return [source_path]
+
+        pattern = "**/*" if self.recursive else "*"
+        return [
+            file_path
+            for file_path in sorted(source_path.glob(pattern))
+            if file_path.suffix.lower() in self.SUPPORTED_EXTENSIONS
+            and file_path.name not in self.EXCLUDED_NAMES
+            and file_path.is_file()
+        ]
+
     def load(self, source: Path | str) -> list[Document]:
         """Load a single file or all supported files from a directory."""
         source_path = Path(source).resolve()
@@ -53,14 +72,12 @@ class DocumentLoader:
 
     def _load_directory(self, directory: Path) -> list[Document]:
         """Load all supported files from a directory."""
-        pattern = "**/*" if self.recursive else "*"
         docs: list[Document] = []
-        for file_path in sorted(directory.glob(pattern)):
-            if file_path.suffix.lower() in self.SUPPORTED_EXTENSIONS and file_path.is_file():
-                try:
-                    docs.append(self._load_file(file_path))
-                except Exception:
-                    logger.exception("Failed to load %s, skipping", file_path)
+        for file_path in self.list_files(directory):
+            try:
+                docs.append(self._load_file(file_path))
+            except Exception:
+                logger.exception("Failed to load %s, skipping", file_path)
         logger.info("Loaded %d documents from %s", len(docs), directory)
         return docs
 
@@ -137,10 +154,8 @@ class DocumentLoader:
             yield self._load_file(source_path)
             return
 
-        pattern = "**/*" if self.recursive else "*"
-        for file_path in sorted(source_path.glob(pattern)):
-            if file_path.suffix.lower() in self.SUPPORTED_EXTENSIONS and file_path.is_file():
-                try:
-                    yield self._load_file(file_path)
-                except Exception:
-                    logger.exception("Failed to load %s, skipping", file_path)
+        for file_path in self.list_files(source_path):
+            try:
+                yield self._load_file(file_path)
+            except Exception:
+                logger.exception("Failed to load %s, skipping", file_path)
