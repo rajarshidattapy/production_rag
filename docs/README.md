@@ -4,9 +4,8 @@
 
 **Retrieval-augmented generation as a service: vector-search baseline, optional hybrid retrieval and cross-encoder reranking, multi-provider LLMs, and end-to-end observability.**
 
-[![CI](https://img.shields.io/github/actions/workflow/status/OWNER/REPO/ci.yml?branch=main&style=flat-square&logo=githubactions&logoColor=white&label=CI)](https://github.com/OWNER/REPO/actions)
-[![Coverage](https://img.shields.io/codecov/c/github/OWNER/REPO?style=flat-square&logo=codecov&logoColor=white)](https://codecov.io/gh/OWNER/REPO)
-[![License](https://img.shields.io/github/license/OWNER/REPO?style=flat-square)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/rajarshidattapy/production_rag/ci.yml?branch=master&style=flat-square&logo=githubactions&logoColor=white&label=CI)](https://github.com/rajarshidattapy/production_rag/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-proprietary-555555?style=flat-square)](../LICENSE)
 
 [Quickstart](#quickstart) · [Architecture](#architecture) · [Configuration](#configuration) · [Deployment](#deployment) · [Observability](#observability)
 
@@ -928,7 +927,7 @@ This project showcases production AI/ML engineering across the full stack:
 
 ## License
 
-MIT License — see [LICENSE](../LICENSE) for details.
+Proprietary — see [LICENSE](../LICENSE) for permitted use.
 
 
 
