@@ -1,8 +1,28 @@
+<div align="center">
+
 # Production-Grade RAG Pipeline
 
-![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB.svg) ![ChromaDB 1.5+](https://img.shields.io/badge/chromadb-1.5%2B-FFDE2D.svg) ![Pydantic 2.14+](https://img.shields.io/badge/pydantic-2.14%2B-E92063.svg) ![Langfuse 2.60+](https://img.shields.io/badge/langfuse-2.60%2B-4E9CFF.svg) ![OpenTelemetry 1.30+](https://img.shields.io/badge/opentelemetry-1.30%2B-F5A800.svg) ![Prometheus client 0.26+](https://img.shields.io/badge/prometheus--client-0.26%2B-E6522C.svg) ![Grafana](https://img.shields.io/badge/grafana-F46800.svg) ![Redis](https://img.shields.io/badge/redis-DC382D.svg) ![Kafka](https://img.shields.io/badge/kafka-231F20.svg) ![RabbitMQ](https://img.shields.io/badge/rabbitmq-FF6600.svg) ![Celery](https://img.shields.io/badge/celery-37814A.svg) ![AWS](https://img.shields.io/badge/aws-232F3E.svg) ![Vultr](https://img.shields.io/badge/vultr-007BFC.svg) ![Terraform](https://img.shields.io/badge/terraform-844FBA.svg) ![Ansible](https://img.shields.io/badge/ansible-EE0000.svg) ![SageMaker](https://img.shields.io/badge/amazon%20sagemaker-FF9900.svg) ![Kubernetes](https://img.shields.io/badge/kubernetes-326CE5.svg) ![Caddy](https://img.shields.io/badge/caddy-1F88C0.svg) ![Docker](https://img.shields.io/badge/docker-2496ED.svg)
+**Retrieval-augmented generation as a service: vector-search baseline, optional hybrid retrieval and cross-encoder reranking, multi-provider LLMs, and end-to-end observability.**
 
-A **Retrieval-Augmented Generation (RAG)** service built with FastAPI, ChromaDB, and OpenAI, OpenRouter, or Anthropic models. It goes from a vector-search baseline to optional hybrid retrieval, optional cross-encoder reranking, optional self-healing, and LLM-as-judge evaluation, with Prometheus metrics always on in the HTTP service and OpenTelemetry and Langfuse instrumentation behind `MONITOR_ENABLED`.
+[![CI](https://img.shields.io/github/actions/workflow/status/OWNER/REPO/ci.yml?branch=main&style=flat-square&logo=githubactions&logoColor=white&label=CI)](https://github.com/OWNER/REPO/actions)
+[![Coverage](https://img.shields.io/codecov/c/github/OWNER/REPO?style=flat-square&logo=codecov&logoColor=white)](https://codecov.io/gh/OWNER/REPO)
+[![License](https://img.shields.io/github/license/OWNER/REPO?style=flat-square)](LICENSE)
+
+[Quickstart](#quickstart) · [Architecture](#architecture) · [Configuration](#configuration) · [Deployment](#deployment) · [Observability](#observability)
+
+</div>
+
+---
+
+| Layer | Stack |
+| :-- | :-- |
+| **Core** | ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white) ![Pydantic](https://img.shields.io/badge/Pydantic-2.14%2B-E92063?style=flat-square&logo=pydantic&logoColor=white) |
+| **Retrieval & models** | ![ChromaDB](https://img.shields.io/badge/ChromaDB-1.5%2B-FFDE2D?style=flat-square) ![OpenAI](https://img.shields.io/badge/OpenAI-412991?style=flat-square&logo=openai&logoColor=white) ![Anthropic](https://img.shields.io/badge/Anthropic-191919?style=flat-square&logo=anthropic&logoColor=white) ![OpenRouter](https://img.shields.io/badge/OpenRouter-6566F1?style=flat-square&logo=openrouter&logoColor=white) |
+| **Observability** | ![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-1.30%2B-F5A800?style=flat-square&logo=opentelemetry&logoColor=white) ![Prometheus client](https://img.shields.io/badge/Prometheus_client-0.26%2B-E6522C?style=flat-square&logo=prometheus&logoColor=white) ![Langfuse](https://img.shields.io/badge/Langfuse-2.60%2B-4E9CFF?style=flat-square) ![Grafana](https://img.shields.io/badge/Grafana-F46800?style=flat-square&logo=grafana&logoColor=white) |
+| **Async & messaging** | ![Celery](https://img.shields.io/badge/Celery-37814A?style=flat-square&logo=celery&logoColor=white) ![RabbitMQ](https://img.shields.io/badge/RabbitMQ-FF6600?style=flat-square&logo=rabbitmq&logoColor=white) ![Kafka](https://img.shields.io/badge/Apache_Kafka-231F20?style=flat-square&logo=apachekafka&logoColor=white) ![Redis](https://img.shields.io/badge/Redis-DC382D?style=flat-square&logo=redis&logoColor=white) |
+| **Infra & deploy** | ![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white) ![Kubernetes](https://img.shields.io/badge/Kubernetes-326CE5?style=flat-square&logo=kubernetes&logoColor=white) ![Terraform](https://img.shields.io/badge/Terraform-844FBA?style=flat-square&logo=terraform&logoColor=white) ![Ansible](https://img.shields.io/badge/Ansible-EE0000?style=flat-square&logo=ansible&logoColor=white) ![Caddy](https://img.shields.io/badge/Caddy-1F88C0?style=flat-square&logo=caddy&logoColor=white) |
+| **Cloud** | ![AWS](https://img.shields.io/badge/AWS-232F3E?style=flat-square&logo=amazonwebservices&logoColor=white) ![SageMaker](https://img.shields.io/badge/Amazon_SageMaker-FF9900?style=flat-square) ![Vultr](https://img.shields.io/badge/Vultr-007BFC?style=flat-square&logo=vultr&logoColor=white) |
+
 
 ---
 
