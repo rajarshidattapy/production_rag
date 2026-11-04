@@ -565,7 +565,7 @@ request('/auth/me',{headers:headers()}).then(signedIn).catch(error=>showAuth(err
 <script id="obsLib">
   /* Pure helpers (no DOM): Prometheus text parsing and summarising. */
   const Obs = (() => {
-    const SYSTEM_PATHS = new Set(['/metrics', '/stats', '/healthz', '/readyz', '/', '/index.html', '/favicon.ico', '/auth/register', '/auth/login', '/auth/logout', '/auth/me', '/chats', '/chats/import', '/chats/{chat_id}', '/chats/{chat_id}/files', '/chunks/{chunk_id}', '/ingest/jobs', '/ingest/jobs/{job_id}', '/ingest/jobs/{job_id}/cancel', '/ingest/jobs/{job_id}/retry']);
+    const SYSTEM_PATHS = new Set(['/metrics', '/stats', '/healthz', '/readyz', '/', '/index.html', 'unmatched', '/auth/register', '/auth/login', '/auth/logout', '/auth/me', '/chats', '/chats/import', '/chats/{chat_id}', '/chats/{chat_id}/files', '/chunks/{chunk_id}', '/ingest/jobs', '/ingest/jobs/{job_id}', '/ingest/jobs/{job_id}/cancel', '/ingest/jobs/{job_id}/retry']);
     const FRIENDLY = {
       '/chats/{chat_id}/messages': 'Ask a question', '/query': 'Ask a question (API)', '/query/stream': 'Ask a question (streaming)', '/upload': 'Upload a PDF',
       '/ingest': 'Index a document', '/ingest/async': 'Index in the background',
@@ -639,6 +639,9 @@ request('/auth/me',{headers:headers()}).then(signedIn).catch(error=>showAuth(err
               t.requests += s.value;
               if (code >= 500) t.serverErr += s.value; else if (code >= 400) t.clientErr += s.value; else t.ok += s.value;
             }
+          } else if (s.name === 'rag_http_stream_errors_total') {
+            // Counted as 200s above, because a stream fails after its response has started.
+            for (const t of [e, all]) { t.ok -= s.value; t.serverErr += s.value; }
           } else if (s.name === 'rag_http_request_duration_seconds_sum') { e.sum += s.value; all.sum += s.value; }
           else if (s.name === 'rag_http_request_duration_seconds_count') { e.count += s.value; all.count += s.value; }
           else if (s.name === 'rag_http_request_duration_seconds_bucket') {

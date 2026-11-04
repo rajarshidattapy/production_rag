@@ -2,8 +2,6 @@
 
 ### Before going to production
 
-- **Run Docker and CI once, with a real LLM.** The stack has never run on Linux or in Docker, and CI has never run on GitHub.
-- **Count unhandled 500s on the dashboard.** They currently skip the metrics, so the error rate can look healthy during an outage.
 - **Stop anyone from wiping the store.** `/ingest` with `reset: true` deletes every user's documents.
 - **Rate-limit logins by IP** if the server is public. The lockout is per account, and the reverse proxy can do this.
 - **Per-user documents**, if users shouldn't see each other's PDFs. Any account can retrieve any uploaded document today.
@@ -43,11 +41,80 @@ Roughly in the order they will hurt. Each says how it was confirmed: *reproduced
 
 **Moving to several servers**
 
+- **Use a Chroma server in production, not embedded Chroma.** Embedded 1.5.9 sometimes can't read a freshly written collection, and only a new client clears it ([upstream issue](https://github.com/chroma-core/chroma/issues/7946)). The app now reopens the client automatically, at most every 30 s, but each reopen leaves the old client in memory until it can be collected. The `docker-compose.yml` setup already uses a server. *Reproduced: 6 of 204 attempts embedded, 0 of 84 on a server.*
 - **SQLite and** `ingest_jobs.json` **tie the app to one host.** API replicas on separate machines need a database server for accounts, chats, and jobs. *From the code.*
 - **Job status is a whole file, read on every poll** and rewritten on every save, holding up to 500 jobs. Move it to the database. *From the code.*
 - `/upload` **holds each file in memory**, up to 50 MB per concurrent upload. Stream to disk. *From the code.*
 - **The dashboard shows only the replica that answers it.** Use Prometheus and Grafana across replicas. *From the code.*
 - **Chroma is only tested to 50k chunks** on a single node, with its index in memory. Load test it at your target size, and move to Qdrant only if that shows Chroma is the bottleneck. *Measured at 50k; nothing larger has been run.*
+
+
+
+## Additional features to add to Production RAG
+
+### Security and data protection
+
+1. Missing improvement: Prompt Injection Defense — Detect and neutralize malicious instructions embedded in uploaded documents before they influence LLM behaviour.
+2. Missing improvement: PII Detection and Redaction — Identify and redact sensitive information such as emails, phone numbers, credentials, and personal identifiers before indexing or generation.
+3. Missing improvement: Document Provenance Tracking — Track each document's origin, uploader, upload timestamp, content hash, version, and trust level.
+4. Missing improvement: Fine-Grained Authorization — Enforce document-, collection-, and role-level permissions during retrieval, not merely at the API endpoint.
+5. Missing improvement: Audit Logging — Record security-sensitive actions such as uploads, queries, document modifications, deletions, and administrative operations without exposing sensitive content.
+6. Missing improvement: Secrets Management — Store API keys, database credentials, and encryption keys using a dedicated secrets manager instead of relying solely on environment variables.
+
+### Ingestion and document processing
+
+7. Missing improvement: OCR Fallback — Automatically extract text from scanned PDFs and image-based documents when ordinary PDF text extraction fails.
+8. Missing improvement: Ingestion Quality Validation — Detect corrupted files, empty extraction, malformed pages, unsupported formats, and extraction failures before indexing.
+9. Missing improvement: Semantic Deduplication — Identify duplicate and near-duplicate documents or chunks to reduce redundant storage and retrieval noise.
+10. Missing improvement: Document Versioning — Maintain document versions and ensure updated files replace or supersede stale indexed content.
+11. Missing improvement: Document Structure Awareness — Preserve headings, sections, paragraphs, and hierarchical relationships during parsing and chunking.
+12. Missing improvement: Table-Aware Extraction — Preserve table headers, rows, columns, and cell relationships instead of flattening tables into ambiguous text.
+13. Missing improvement: Chunk Metadata Validation — Enforce a consistent metadata schema for document IDs, page numbers, sections, ownership, and source references.
+
+### Retrieval and context engineering
+
+14. Missing improvement: Parent-Child Retrieval — Retrieve precise child chunks for relevance while supplying their larger parent sections for sufficient context.
+15. Missing improvement: Multi-Hop Retrieval — Retrieve and combine evidence from multiple documents when a question requires connecting several facts.
+16. Missing improvement: Query Intent Classification — Classify questions into factual lookup, summarization, comparison, analytical, or multi-hop queries before choosing a retrieval strategy.
+17. Missing improvement: Query Routing — Dynamically select vector, hybrid, metadata-filtered, or multi-hop retrieval based on query intent.
+18. Missing improvement: Context Compression — Remove redundant passages and compress retrieved evidence while preserving information needed to answer accurately.
+19. Missing improvement: Temporal Retrieval — Prefer current document versions and distinguish historical information from the latest available facts.
+20. Missing improvement: Adaptive Search Weight Calibration — Tune BM25 and vector search weights against a representative evaluation dataset instead of relying on fixed defaults.
+21. Missing improvement: Retrieval Regression Testing — Track Recall@K, Precision@K, MRR, and NDCG to detect retrieval-quality regressions after code or model changes.
+22. Missing improvement: Conversation-Aware Retrieval — Resolve references such as "that document" and "the previous method" using relevant conversation context.
+
+### Self-healing and answer verification
+
+23. Missing improvement: Claim-Level Verification — Break generated answers into atomic claims and independently verify each claim against its supporting retrieved evidence.
+24. Missing improvement: Semantic Entailment Verification — Use an entailment model or equivalent semantic check to determine whether evidence actually supports a claim beyond lexical overlap.
+25. Missing improvement: Verifier Ensemble — Combine deterministic validation, an LLM judge, and semantic verification to reduce dependence on a single evaluator.
+26. Missing improvement: Source Conflict Resolution — Detect contradictory documents and resolve conflicts using source authority, document versions, and timestamps.
+27. Missing improvement: Confidence Calibration — Calibrate verifier confidence and acceptance thresholds using labelled examples rather than relying entirely on manually selected thresholds.
+28. Missing improvement: Expected-Utility Repair Selection — Choose the cheapest repair action likely to fix a diagnosed failure instead of blindly executing retries.
+29. Missing improvement: Semantic Retry Termination — Stop healing attempts when new retrieval results provide no meaningful evidence improvement.
+30. Missing improvement: Healing Cost Budget — Enforce per-query limits on additional LLM calls, tokens, retrieval attempts, and total healing latency.
+31. Missing improvement: Adversarial Healing Evaluation — Test the healing pipeline against prompt injection, fabricated citations, misleading evidence, contradictory sources, and verifier failures.
+32. Missing improvement: False-Acceptance Evaluation — Measure how often the verifier incorrectly approves unsupported answers and how often it rejects correct ones.
+
+### Production reliability and infrastructure
+
+33. Missing improvement: LLM Retry with Exponential Backoff — Retry transient provider failures using exponential delays and jitter to avoid synchronized retry storms.
+34. Missing improvement: LLM Provider Fallback — Automatically switch to a configured alternative provider when the primary LLM becomes unavailable.
+35. Missing improvement: LLM Circuit Breaker — Temporarily stop requests to an unhealthy provider and prevent repeated failures from exhausting resources.
+36. Missing improvement: Request Cancellation Propagation — Cancel downstream retrieval, reranking, and LLM operations when the client disconnects or the request times out.
+37. Missing improvement: Bulkhead Isolation — Isolate ingestion, retrieval, reranking, and generation resources so overload in one subsystem does not bring down the others.
+38. Missing improvement: Idempotent Ingestion Jobs — Prevent duplicate job submissions from creating repeated or inconsistent document indexing operations.
+39. Missing improvement: Dead-Letter Job Handling — Preserve failed ingestion jobs for inspection, diagnosis, and controlled reprocessing.
+40. Missing improvement: Database Migration Framework — Version database schema changes and apply them safely across deployments.
+41. Missing improvement: Dependency Vulnerability Scanning — Scan Python dependencies and container images for known security vulnerabilities.
+42. Missing improvement: Software Bill of Materials (SBOM) — Generate a machine-readable inventory of dependencies to improve supply-chain transparency.
+43. Missing improvement: Container Image Signing — Sign release images and verify their authenticity before deployment.
+44. Missing improvement: Graceful Model Warm-Up — Load and initialize embedding, reranking, and other model components before accepting production traffic.
+45. Missing improvement: Load and Soak Testing — Validate latency, throughput, memory consumption, and recovery behaviour under sustained concurrent traffic.
+
+
+
+&nbsp;
 
 ## Deploy
 
@@ -87,18 +154,18 @@ Vultr's automatic backups add 20%, about $4 to$5. A domain is roughly $1 a month
 1. **Install CPU-only PyTorch in the Dockerfile.** The image currently pulls the full GPU build, which adds several GB and does nothing on a CPU VM.
 2. **Add Caddy for HTTPS** and stop publishing port 8000, which sends passwords and session cookies unencrypted. In `docker-compose.yml`, remove `ports` from `api`, then add this service and a `caddy_data` entry under `volumes`:
    ```yaml
-    caddy:
-      image: caddy:2
-      restart: unless-stopped
-      ports: ["80:80", "443:443"]
-      command: caddy reverse-proxy --from rag.example.com --to api:8000
-      volumes: [caddy_data:/data]
+     caddy:
+       image: caddy:2
+       restart: unless-stopped
+       ports: ["80:80", "443:443"]
+       command: caddy reverse-proxy --from rag.example.com --to api:8000
+       volumes: [caddy_data:/data]
    ```
 3. **Pull the image instead of building on the VM.** Replace `build:` with the image the publish workflow pushes to GHCR. Building on a 4 GB VM is slow, because it downloads PyTorch and the models.
 4. **Give shutdown time to finish** with `stop_grace_period: 90s` on `api`. The Docker default of 10 s can cut off an indexing batch. That's recoverable with Run again, but it's avoidable.
-
-1. 
-2. **Restore a backup once**, so you know it works before you need it.
-
+5. 
+6. **Restore a backup once**, so you know it works before you need it.
 
 
+
+&nbsp;

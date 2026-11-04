@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable
@@ -12,8 +14,9 @@ from typing import Any, TypeVar
 import chromadb
 import httpx
 import numpy as np
+from chromadb.api.shared_system_client import SharedSystemClient
 from chromadb.config import Settings as ChromaSettings
-from chromadb.errors import NotFoundError
+from chromadb.errors import InternalError, NotFoundError
 
 from src.ingestion.chunker import Chunk
 from src.utils.retry import retry_with_backoff
@@ -24,6 +27,18 @@ logger = logging.getLogger(__name__)
 _EMBEDDING_MODEL_CACHE: dict[str, Any] = {}
 
 T = TypeVar("T")
+
+# Embedded Chroma 1.5.9 sometimes can't read a freshly written collection: every query fails
+# with this error, retries don't clear it, yet the data on disk is fine and a newly opened
+# client reads it. See https://github.com/chroma-core/chroma/issues/7946.
+_HNSW_READER_ERROR = "hnsw segment reader"
+# Each reopen leaves the old client's memory behind until it can be collected, so a store
+# that is really broken must not reopen on every query.
+_REOPEN_MIN_INTERVAL_SECONDS = 30.0
+# Chroma shares one client system per path. Stores on the same path move to a new one together.
+_client_lock = threading.Lock()
+_client_generations: dict[str, int] = {}
+_last_reopen: dict[str, float] = {}
 
 
 class VectorStoreUnavailableError(RuntimeError):
@@ -94,11 +109,9 @@ class VectorStore:
             self._client = retry_with_backoff(_init_client, retries=3, backoff_in_seconds=0.5)
         else:
             self.persist_path.mkdir(parents=True, exist_ok=True)
-            self._client = chromadb.PersistentClient(
-                path=str(self.persist_path),
-                settings=ChromaSettings(anonymized_telemetry=False),
-            )
+            self._client = self._open_embedded_client()
 
+        self._client_generation = _client_generations.get(str(self.persist_path), 0)
         self._collection = retry_with_backoff(
             self._get_or_create_collection, retries=5, backoff_in_seconds=1.0
         )
@@ -108,6 +121,50 @@ class VectorStore:
             collection_name,
             self.persist_path,
         )
+
+    def _open_embedded_client(self) -> Any:
+        return chromadb.PersistentClient(
+            path=str(self.persist_path),
+            settings=ChromaSettings(anonymized_telemetry=False),
+        )
+
+    def _follow_reopened_client(self) -> None:
+        """Move to the current client if another store on this path has reopened it."""
+        if self.chroma_host:
+            return
+        key = str(self.persist_path)
+        if self._client_generation == _client_generations.get(key, 0):
+            return
+        with _client_lock:
+            self._connect_to_current_client(key)
+
+    def _connect_to_current_client(self, key: str) -> None:
+        self._client = self._open_embedded_client()
+        self._collection = self._get_or_create_collection()
+        self._client_generation = _client_generations.get(key, 0)
+
+    def _reopen_client(self) -> bool:
+        """Replace this path's client system, working around the read failure above.
+
+        Only the shared entry is replaced. The old system isn't stopped, because other
+        threads may still be using it. Returns False if there's nothing to reopen, or if
+        one was just opened, in which case the error isn't the one reopening can fix.
+        """
+        if self.chroma_host:
+            return False
+        key = str(self.persist_path)
+        with _client_lock:
+            if self._client_generation == _client_generations.get(key, 0):
+                now = time.monotonic()
+                if now - _last_reopen.get(key, float("-inf")) < _REOPEN_MIN_INTERVAL_SECONDS:
+                    return False
+                _last_reopen[key] = now
+                identifier = self._client._identifier
+                SharedSystemClient._identifier_to_system.pop(identifier, None)
+                SharedSystemClient._identifier_to_refcount.pop(identifier, None)
+                _client_generations[key] = self._client_generation + 1
+            self._connect_to_current_client(key)
+        return True
 
     def _get_or_create_collection(self):
         """Create the collection with explicit HNSW settings (or open the existing one).
@@ -156,10 +213,20 @@ class VectorStore:
         """
 
         def attempt() -> T:
+            self._follow_reopened_client()
             try:
                 return op(self._collection)
             except NotFoundError:
                 self._collection = self._get_or_create_collection()
+                return op(self._collection)
+            except InternalError as exc:
+                if _HNSW_READER_ERROR not in str(exc) or not self._reopen_client():
+                    raise
+                logger.warning(
+                    "Reopened the Chroma client for %s after a read failure: %s",
+                    self.persist_path,
+                    exc,
+                )
                 return op(self._collection)
 
         try:

@@ -383,13 +383,17 @@ class TestJobLifecycle:
         real = api_app._persist_ingest_job
 
         def counting(job_id: str, record: dict[str, Any]) -> None:
-            saves.append(record["status"])
             real(job_id, record)
+            saves.append(record["status"])
 
         monkeypatch.setattr(api_app, "_persist_ingest_job", counting)
         client = TestClient(api_app.app)
         job_id = _start(client, corpus)
         _wait(client, job_id)
+        # The status is visible in memory a moment before it reaches the disk.
+        deadline = time.monotonic() + 10
+        while saves[-1] != "completed" and time.monotonic() < deadline:
+            time.sleep(0.01)
         assert saves[-1] == "completed"
         assert len(saves) <= 5
         assert json.loads(api_app._ingest_jobs_path().read_text())[job_id]["status"] == "completed"

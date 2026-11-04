@@ -1,6 +1,6 @@
 # Production-Grade RAG Pipeline
 
-![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB.svg) ![ChromaDB 1.5+](https://img.shields.io/badge/chromadb-1.5%2B-FFDE2D.svg) ![Pydantic 2.14+](https://img.shields.io/badge/pydantic-2.14%2B-E92063.svg) ![Langfuse 2.60+](https://img.shields.io/badge/langfuse-2.60%2B-4E9CFF.svg) ![OpenTelemetry 1.30+](https://img.shields.io/badge/opentelemetry-1.30%2B-F5A800.svg) ![Prometheus client 0.26+](https://img.shields.io/badge/prometheus--client-0.26%2B-E6522C.svg)
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB.svg) ![ChromaDB 1.5+](https://img.shields.io/badge/chromadb-1.5%2B-FFDE2D.svg) ![Pydantic 2.14+](https://img.shields.io/badge/pydantic-2.14%2B-E92063.svg) ![Langfuse 2.60+](https://img.shields.io/badge/langfuse-2.60%2B-4E9CFF.svg) ![OpenTelemetry 1.30+](https://img.shields.io/badge/opentelemetry-1.30%2B-F5A800.svg) ![Prometheus client 0.26+](https://img.shields.io/badge/prometheus--client-0.26%2B-E6522C.svg) ![Grafana](https://img.shields.io/badge/grafana-F46800.svg) ![Redis](https://img.shields.io/badge/redis-DC382D.svg) ![Kafka](https://img.shields.io/badge/kafka-231F20.svg) ![RabbitMQ](https://img.shields.io/badge/rabbitmq-FF6600.svg) ![Celery](https://img.shields.io/badge/celery-37814A.svg) ![AWS](https://img.shields.io/badge/aws-232F3E.svg) ![Vultr](https://img.shields.io/badge/vultr-007BFC.svg) ![Terraform](https://img.shields.io/badge/terraform-844FBA.svg) ![Ansible](https://img.shields.io/badge/ansible-EE0000.svg) ![SageMaker](https://img.shields.io/badge/amazon%20sagemaker-FF9900.svg) ![Kubernetes](https://img.shields.io/badge/kubernetes-326CE5.svg) ![Caddy](https://img.shields.io/badge/caddy-1F88C0.svg) ![Docker](https://img.shields.io/badge/docker-2496ED.svg)
 
 A **Retrieval-Augmented Generation (RAG)** service built with FastAPI, ChromaDB, and OpenAI, OpenRouter, or Anthropic models. It goes from a vector-search baseline to optional hybrid retrieval, optional cross-encoder reranking, optional self-healing, and LLM-as-judge evaluation, with Prometheus metrics always on in the HTTP service and OpenTelemetry and Langfuse instrumentation behind `MONITOR_ENABLED`.
 
@@ -221,7 +221,7 @@ Citation support is a word-overlap heuristic, so it can catch a misattributed ci
 - **Context Budget** — `RAG_MAX_CONTEXT_CHARS` (default 12000) caps the context sent to the LLM as a cost guardrail. Passages past the budget are dropped, and the last one that fits is cut at the character limit, which can be mid-sentence.
 - **Security Hardening** — Path-traversal guards on `/ingest`, BM25 index stored as plain integer arrays loaded with `allow_pickle=False` (no pickle), 0o600 file permissions on data files, `re.escape()` on pricing pattern matching to prevent ReDoS.
 - **Docker Multi-Stage Build** — `deps → model-cache → runtime` stages; non-root user, with the default embedding and reranker models cached in the image. The image and compose stack have not been run end to end yet; see [known gaps](#known-gaps-to-close-before-production).
-- **Tests and CI** — 501 unit, integration, and stress tests (LLM calls mocked; no API keys needed). GitHub Actions workflows cover CI, the evaluation gate (skipped when the `OPENAI_API_KEY` secret is absent), and GHCR publish on every push to `master`.
+- **Tests and CI** — 522 unit, integration, and stress tests (LLM calls mocked; no API keys needed). GitHub Actions workflows cover CI, the evaluation gate (skipped when the `OPENAI_API_KEY` secret is absent), and GHCR publish on every push to `master`.
 
 ---
 
@@ -515,7 +515,7 @@ The wrapper applies to the HTTP service and `scripts/evaluate.py`. `requirements
 
 ### Prometheus (HTTP service)
 
-`GET /metrics` exposes `rag_http_requests_total{path,method,status_code}`, `rag_http_request_duration_seconds{path,method}`, and the `rag_healing_*` metrics listed under [Self-Healing Observability](#self-healing-observability). The UI's **Observability** button reads these along with `/healthz` and `/stats`, and excludes health checks and its own polling from the request counts.
+`GET /metrics` exposes `rag_http_requests_total{path,method,status_code}` (requests matching no route share `path="unmatched"`), `rag_http_stream_errors_total{path,reason}` (streams that failed after answering 200), `rag_http_request_duration_seconds{path,method}`, and the `rag_healing_*` metrics listed under [Self-Healing Observability](#self-healing-observability). The UI's **Observability** button reads these along with `/healthz` and `/stats`, and excludes health checks and its own polling from the request counts.
 
 ### OpenTelemetry Metrics
 

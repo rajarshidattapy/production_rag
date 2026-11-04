@@ -155,6 +155,17 @@ _http_request_duration_seconds = Histogram(
     ["path", "method"],
     registry=_metrics_registry,
 )
+# A stream has already answered 200 by the time it fails, so rag_http_requests_total can't
+# show these. Subtract them from its 200s to get the streams that really succeeded.
+_http_stream_errors_total = Counter(
+    "rag_http_stream_errors_total",
+    "Streaming responses that failed after they started, by path and reason",
+    ["path", "reason"],
+    registry=_metrics_registry,
+)
+# Requests that match no route share this label. Raw URLs would create one permanent
+# time series per URL, which anyone probing random paths could grow without limit.
+_UNMATCHED_PATH = "unmatched"
 
 
 class _PrometheusMiddleware(BaseHTTPMiddleware):
@@ -166,17 +177,24 @@ class _PrometheusMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         start = time.perf_counter()
-        response = await call_next(request)
-        duration = time.perf_counter() - start
-
-        route = request.scope.get("route")
-        path = getattr(route, "path", request.url.path)
-
-        _http_requests_total.labels(
-            path=path, method=request.method, status_code=response.status_code
-        ).inc()
-        _http_request_duration_seconds.labels(path=path, method=request.method).observe(duration)
+        try:
+            response = await call_next(request)
+        except Exception:
+            # Unhandled, so the server is about to answer 500. Without this the error
+            # rate would miss exactly the failures it exists to show.
+            self._record(request, 500, start)
+            raise
+        self._record(request, response.status_code, start)
         return response
+
+    @staticmethod
+    def _record(request: Request, status_code: int, start: float) -> None:
+        route = request.scope.get("route")
+        path = getattr(route, "path", _UNMATCHED_PATH)
+        _http_requests_total.labels(path=path, method=request.method, status_code=status_code).inc()
+        _http_request_duration_seconds.labels(path=path, method=request.method).observe(
+            time.perf_counter() - start
+        )
 
 
 app.add_middleware(_PrometheusMiddleware)
@@ -1342,10 +1360,13 @@ async def query_stream(request: QueryRequest) -> StreamingResponse:
         except ValueError as exc:
             yield f"data: {json.dumps({'error': str(exc)})}\n\n"
         except TimeoutError:
+            _http_stream_errors_total.labels(path="/query/stream", reason="timeout").inc()
             yield f"data: {json.dumps({'error': 'The query timed out.'})}\n\n"
         except VectorStoreUnavailableError:
+            _http_stream_errors_total.labels(path="/query/stream", reason="unavailable").inc()
             yield f"data: {json.dumps({'error': 'The vector database is unavailable.'})}\n\n"
         except Exception as exc:
+            _http_stream_errors_total.labels(path="/query/stream", reason="internal").inc()
             yield f"data: {json.dumps({'error': 'Internal server error during streaming.'})}\n\n"
             raise exc
         finally:
