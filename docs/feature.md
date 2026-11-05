@@ -1,12 +1,5 @@
 ## Not implemented yet, but identified as next production upgrades:
 
-### Before going to production
-
-- **Stop anyone from wiping the store.** `/ingest` with `reset: true` deletes every user's documents.
-- **Rate-limit logins by IP** if the server is public. The lockout is per account, and the reverse proxy can do this.
-- **Per-user documents**, if users shouldn't see each other's PDFs. Any account can retrieve any uploaded document today.
-- **Follow-up questions**, soon after launch. Answers don't use earlier messages in the chat.
-
 ### Fix when scaling
 
 Roughly in the order they will hurt. Each says how it was confirmed: *reproduced*, *measured*, or *from the code*.
