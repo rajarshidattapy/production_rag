@@ -1,12 +1,8 @@
 ## Not implemented yet, but identified as next production upgrades:
 
-Grouped by pipeline stage, in the order data flows through the system, so each part only needs to be worked on once. Each item that came from the code says how it was confirmed.
-
 ### Stage 1: Ingestion
 
 *Mostly `src/ingestion/`, plus ingestion in `src/pipeline.py` and `src/api.py`. Changing what gets extracted or stored means re-ingesting, so do this stage first.*
-
-**Store these now, or later stages will send you back here**
 
 - **Parent-Child Retrieval** needs each chunk to record its parent section.
 - **Temporal Retrieval** and **Source Conflict Resolution** need document versions, timestamps, and source authority.
