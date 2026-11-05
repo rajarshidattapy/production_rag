@@ -64,6 +64,7 @@ Grouped by pipeline stage, in the order data flows through the system, so each p
 
 **Understanding the question**
 
+- **Conversation-Aware Retrieval:** Resolve references such as "that document" and "the previous method" using relevant conversation context.
 - **Query Intent Classification:** Classify questions into factual lookup, summarization, comparison, analytical, or multi-hop queries before choosing a retrieval strategy.
 - **Query Routing:** Dynamically select vector, hybrid, metadata-filtered, or multi-hop retrieval based on query intent.
 - **Multi-Hop Retrieval:** Retrieve and combine evidence from multiple documents when a question requires connecting several facts.
@@ -141,6 +142,7 @@ Grouped by pipeline stage, in the order data flows through the system, so each p
 
 **Several servers**
 
+- **Use a Chroma server in production, not embedded Chroma.** Embedded mode can fail to read a freshly written collection and does not suit replicas; keep Chroma behind the internal Docker network.
 - **SQLite and** `ingest_jobs.json` **tie the app to one host.** API replicas on separate machines need a database server for accounts, chats, and jobs. *From the code.*
 - **The dashboard shows only the replica that answers it.** Use Prometheus and Grafana across replicas. *From the code.*
 - **Database Migration Framework:** Version database schema changes and apply them safely across deployments.
