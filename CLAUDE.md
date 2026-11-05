@@ -14,11 +14,9 @@
 **How to add one:**
 
 1. Read `docs/feature.md` first. If the problem is already listed, update that item with anything new instead of adding a second one.
-2. Put it in the section that fits:
-   - **Before going to production:** needed before the first real deployment.
-   - **Fix when scaling:** under the group that fits, roughly in the order things will hurt.
+2. Put it in the pipeline stage where the fix would be made (Stage 1 Ingestion through Stage 6 Infrastructure), under the group that fits. If a later stage needs data stored during ingestion, also add it to **Store these now** in Stage 1.
 3. Match the format of the existing items: a bold one-line statement of the problem, why it matters, and the fix if it's known.
-4. For items under **Fix when scaling**, end with how it was confirmed: *Reproduced*, *Measured* (with the numbers), or *From the code*. Only claim what you actually did.
+4. End with how it was confirmed: *Reproduced*, *Measured* (with the numbers), or *From the code*. Only claim what you actually did.
 
 **Remove an item** in the same change that fixes it. If you fix only part of it, reword it to say what's left.
 
