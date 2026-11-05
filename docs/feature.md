@@ -36,7 +36,7 @@ Roughly in the order they will hurt. Each says how it was confirmed: *reproduced
 **Moving to several servers**
 
 - **Login limits are counted per process**, so each replica allows its own 20 attempts. A shared store such as Redis, or limits at the proxy, would fix it. *From the code.*
-- **Use a Chroma server in production, not embedded Chroma.** Embedded 1.5.9 sometimes can't read a freshly written collection, and only a new client clears it ([upstream issue](https://github.com/chroma-core/chroma/issues/7946)). The app now reopens the client automatically, at most every 30 s, but each reopen leaves the old client in memory until it can be collected. The `docker-compose.yml` setup already uses a server. *Reproduced: 6 of 204 attempts embedded, 0 of 84 on a server.*
+
 - **SQLite and** `ingest_jobs.json` **tie the app to one host.** API replicas on separate machines need a database server for accounts, chats, and jobs. *From the code.*
 - **Job status is a whole file, read on every poll** and rewritten on every save, holding up to 500 jobs. Move it to the database. *From the code.*
 - `/upload` **holds each file in memory**, up to 50 MB per concurrent upload. Stream to disk. *From the code.*
@@ -152,14 +152,15 @@ Vultr's automatic backups add 20%, about $4 to$5. A domain is roughly $1 a month
 1. **Install CPU-only PyTorch in the Dockerfile.** The image currently pulls the full GPU build, which adds several GB and does nothing on a CPU VM.
 2. **Add Caddy for HTTPS** and stop publishing port 8000, which sends passwords and session cookies unencrypted. In `docker-compose.yml`, remove `ports` from `api`, then add this service and a `caddy_data` entry under `volumes`:
    ```yaml
-     caddy:
-       image: caddy:2
-       restart: unless-stopped
-       ports: ["80:80", "443:443"]
-       command: caddy reverse-proxy --from rag.example.com --to api:8000
-       volumes: [caddy_data:/data]
+      caddy:
+        image: caddy:2
+        restart: unless-stopped
+        ports: ["80:80", "443:443"]
+        command: caddy reverse-proxy --from rag.example.com --to api:8000
+        volumes: [caddy_data:/data]
    ```
-   Also set `FORWARDED_ALLOW_IPS=*` in `.env`, but only once port 8000 isn't published. Without it, every user shares Caddy's address and one login limit.
+
+    Also set `FORWARDED_ALLOW_IPS=*` in `.env`, but only once port 8000 isn't published. Without it, every user shares Caddy's address and one login limit.
 3. **Pull the image instead of building on the VM.** Replace `build:` with the image the publish workflow pushes to GHCR. Building on a 4 GB VM is slow, because it downloads PyTorch and the models.
 4. **Give shutdown time to finish** with `stop_grace_period: 90s` on `api`. The Docker default of 10 s can cut off an indexing batch. That's recoverable with Run again, but it's avoidable.
 5. 

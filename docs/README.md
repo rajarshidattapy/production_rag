@@ -301,9 +301,14 @@ curl -N -X POST http://localhost:8000/query/stream \
 
 ### Run the API Server
 
+Run Chroma as its own server, as production does. Set `RAG_CHROMA_HOST=127.0.0.1` and `RAG_CHROMA_PORT=8001` in `.env`, then start each in its own terminal, with Chroma first:
+
 ```bash
+chroma run --path data/chroma_server --port 8001
 uvicorn src.api:app --reload --host 0.0.0.0 --port 8000
 ```
+
+If Chroma isn't running, queries return `503` and `/readyz` reports not ready. They recover without restarting the API once Chroma is back. Leaving `RAG_CHROMA_HOST` unset runs Chroma inside the app with no server to start, but that mode has a [known read bug](https://github.com/chroma-core/chroma/issues/7946) the app has to work around.
 
 ---
 

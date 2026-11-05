@@ -12,6 +12,7 @@ htmlcov
 coverage.xml
 .code-review-graph
 data/chroma_db
+data/chroma_server
 data/eval_results
 data/chat.db*
 *.log

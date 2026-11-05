@@ -22,6 +22,9 @@ def isolate_chroma_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     from src.config import settings
 
     monkeypatch.setattr(settings, "chroma_path", tmp_path / "test_chroma_rag")
+    # A developer's .env may point at a real Chroma server. Tests must never touch it.
+    monkeypatch.setattr(settings, "chroma_host", None)
+    monkeypatch.setattr(settings, "chroma_port", None)
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     monkeypatch.setattr(settings, "allow_store_reset", True)
 
@@ -83,6 +86,8 @@ def test_settings(tmp_path: Path) -> Settings:
         chunk_size=200,
         chunk_overlap=20,
         chroma_path=tmp_path / "test_chroma_rag",
+        chroma_host=None,
+        chroma_port=None,
         top_k_final=3,
         top_k_retrieval=5,
     )
