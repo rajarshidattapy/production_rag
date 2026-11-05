@@ -40,6 +40,9 @@ services:
       - RAG_OPENROUTER_MODE=${RAG_OPENROUTER_MODE:-auto}
       - RAG_API_KEY=${RAG_API_KEY:-}
       - RAG_ALLOW_SIGNUP=${RAG_ALLOW_SIGNUP:-true}
+      - RAG_ALLOW_STORE_RESET=${RAG_ALLOW_STORE_RESET:-false}
+      # Who may set the client address. Use * only once port 8000 is no longer published.
+      - FORWARDED_ALLOW_IPS=${FORWARDED_ALLOW_IPS:-127.0.0.1}
       - RAG_SESSION_TTL_HOURS=${RAG_SESSION_TTL_HOURS:-720}
       - RAG_SESSION_COOKIE_SECURE=${RAG_SESSION_COOKIE_SECURE:-false}
       - RAG_CORS_ORIGINS=${RAG_CORS_ORIGINS:-*}

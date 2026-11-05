@@ -2,7 +2,7 @@
 
 # Production-Grade RAG Pipeline
 
-**Retrieval-augmented generation as a service: vector-search baseline, optional hybrid retrieval and cross-encoder reranking, multi-provider LLMs, and end-to-end observability.**
+**Retrieval-augmented generation as a service: vector-search baseline, optional hybrid retrieval and cross-encoder reranking, multi-provider LLMs, MCP tool exposure, and end-to-end observability.**
 
 [![CI](https://img.shields.io/github/actions/workflow/status/rajarshidattapy/production_rag/ci.yml?branch=master&style=flat-square&logo=githubactions&logoColor=white&label=CI)](https://github.com/rajarshidattapy/production_rag/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-proprietary-555555?style=flat-square)](../LICENSE)
@@ -18,9 +18,9 @@
 | **Core** | ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white) ![Pydantic](https://img.shields.io/badge/Pydantic-2.14%2B-E92063?style=flat-square&logo=pydantic&logoColor=white) |
 | **Retrieval & models** | ![ChromaDB](https://img.shields.io/badge/ChromaDB-1.5%2B-FFDE2D?style=flat-square) ![OpenAI](https://img.shields.io/badge/OpenAI-412991?style=flat-square&logo=openai&logoColor=white) ![Anthropic](https://img.shields.io/badge/Anthropic-191919?style=flat-square&logo=anthropic&logoColor=white) ![OpenRouter](https://img.shields.io/badge/OpenRouter-6566F1?style=flat-square&logo=openrouter&logoColor=white) |
 | **Observability** | ![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-1.30%2B-F5A800?style=flat-square&logo=opentelemetry&logoColor=white) ![Prometheus client](https://img.shields.io/badge/Prometheus_client-0.26%2B-E6522C?style=flat-square&logo=prometheus&logoColor=white) ![Langfuse](https://img.shields.io/badge/Langfuse-2.60%2B-4E9CFF?style=flat-square) ![Grafana](https://img.shields.io/badge/Grafana-F46800?style=flat-square&logo=grafana&logoColor=white) |
-| **Async & messaging (future)** | ![Celery](https://img.shields.io/badge/Celery-37814A?style=flat-square&logo=celery&logoColor=white) ![RabbitMQ](https://img.shields.io/badge/RabbitMQ-FF6600?style=flat-square&logo=rabbitmq&logoColor=white) ![Kafka](https://img.shields.io/badge/Apache_Kafka-231F20?style=flat-square&logo=apachekafka&logoColor=white) ![Redis](https://img.shields.io/badge/Redis-DC382D?style=flat-square&logo=redis&logoColor=white) |
-| **Infra & deploy (future) ** | ![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white) ![Kubernetes](https://img.shields.io/badge/Kubernetes-326CE5?style=flat-square&logo=kubernetes&logoColor=white) ![Terraform](https://img.shields.io/badge/Terraform-844FBA?style=flat-square&logo=terraform&logoColor=white) ![Ansible](https://img.shields.io/badge/Ansible-EE0000?style=flat-square&logo=ansible&logoColor=white) ![Caddy](https://img.shields.io/badge/Caddy-1F88C0?style=flat-square&logo=caddy&logoColor=white) |
-| **Cloud (future)** | ![AWS](https://img.shields.io/badge/AWS-232F3E?style=flat-square&logo=amazonwebservices&logoColor=white) ![SageMaker](https://img.shields.io/badge/Amazon_SageMaker-FF9900?style=flat-square) ![Vultr](https://img.shields.io/badge/Vultr-007BFC?style=flat-square&logo=vultr&logoColor=white) |
+| **Async & messaging** | ![Celery](https://img.shields.io/badge/Celery-37814A?style=flat-square&logo=celery&logoColor=white) ![RabbitMQ](https://img.shields.io/badge/RabbitMQ-FF6600?style=flat-square&logo=rabbitmq&logoColor=white) ![Kafka](https://img.shields.io/badge/Apache_Kafka-231F20?style=flat-square&logo=apachekafka&logoColor=white) ![Redis](https://img.shields.io/badge/Redis-DC382D?style=flat-square&logo=redis&logoColor=white) |
+| **Infra & deploy** | ![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white) ![Kubernetes](https://img.shields.io/badge/Kubernetes-326CE5?style=flat-square&logo=kubernetes&logoColor=white) ![Terraform](https://img.shields.io/badge/Terraform-844FBA?style=flat-square&logo=terraform&logoColor=white) ![Ansible](https://img.shields.io/badge/Ansible-EE0000?style=flat-square&logo=ansible&logoColor=white) ![Caddy](https://img.shields.io/badge/Caddy-1F88C0?style=flat-square&logo=caddy&logoColor=white) |
+| **Cloud** | ![AWS](https://img.shields.io/badge/AWS-232F3E?style=flat-square&logo=amazonwebservices&logoColor=white) ![SageMaker](https://img.shields.io/badge/Amazon_SageMaker-FF9900?style=flat-square) ![Vultr](https://img.shields.io/badge/Vultr-007BFC?style=flat-square&logo=vultr&logoColor=white) |
 
 
 ---
@@ -37,6 +37,8 @@ Query -> Detect language -> Vector search            (default)
                          -> Cross-encoder reranker   (only if use_reranker=true)
                          -> Context budget -> LLM -> Answer + citation list
                          -> Verify and repair        (only if self_heal=true)
+
+Deployment -> MCP server -> `search_knowledge_base` (and optional `ask_knowledge_base`)
 ```
 
 ## Architecture
@@ -126,7 +128,7 @@ Attaching PDFs or choosing a folder under **Server folder** in the UI starts a b
 - **Restarts:** A graceful shutdown waits for the current batch, so a container manager's stop timeout may end it first, which counts as a crash. After a restart or crash the job is reported as `interrupted`. A crash loses at most the chunks still waiting for their batch, and **Run again** restores them.
 - **Queue:** Each server process runs one job at a time, in order, because indexing is CPU-bound. Questions keep working meanwhile.
 - **Uploads:** Files go to the server one at a time before the job starts, so keep the tab open until the job appears. For a very large collection, put the files on the server and use **Server folder**. The path must be inside `RAG_DATA_DIR`.
-- **Visibility:** A job started while signed in belongs to that user. `GET /ingest/jobs` lists only your own jobs, and other users get `404` for them. The documents themselves still go into the shared store.
+- **Visibility:** A job started while signed in belongs to that user, and so do the documents it adds. `GET /ingest/jobs` lists only your own jobs, and other users get `404` for them.
 
 Measured on one CPU machine with PyTorch limited to one thread (the default), 2,000 text files, 8,000 chunks, and the real embedding model, against the previous load-everything-first code:
 
@@ -144,11 +146,11 @@ The stub rows remove embedding cost to expose the pipeline's own overhead: small
 
 The browser UI requires an account. Chats are stored on the server in SQLite (`data/chat.db`, or `RAG_CHAT_DB_PATH`), so they follow the user across browsers and devices and survive restarts. Chats that older versions left in a browser's `localStorage` are moved into the account after the user confirms, the first time they sign in on that browser.
 
-- **What an account protects:** Chat history only. Other users can't see or change your chats. **Documents are not per-user:** every account searches the same vector store, and `/query`, `/upload`, and `/ingest` don't need a login (they follow `RAG_API_KEY`), so existing API clients keep working.
+- **What an account protects:** Your chats and your documents. PDFs you add while signed in can only be retrieved by you. Documents added without an account are shared, and anyone can read them. `/query`, `/upload`, and `/ingest` still don't need a login (they follow `RAG_API_KEY`), so existing API clients keep working, but they only reach shared documents. Documents indexed before owners were recorded can't be retrieved through the API until they are re-ingested.
 - **What gets saved:** A question and its answer are saved together when the answer is ready. A failed query saves nothing. `/query` and `/query/stream` don't save anything.
-- **Follow-up questions:** Answers don't use earlier messages yet. Each question is retrieved and answered on its own.
-- **Attaching PDFs:** Adds to the shared store. It no longer sends `reset`, which would delete every user's documents.
-- **Passwords and sessions:** Passwords are hashed with scrypt. Sessions use an `HttpOnly`, `SameSite=Strict` cookie, and only a hash of the token is stored. Five wrong passwords lock an account for five minutes.
+- **Follow-up questions:** In a chat, a follow-up like "what about page 3?" is first rewritten into a standalone question using the last few messages, with one extra small LLM call. The rewritten text is used for retrieval and generation, and is returned as `searched_for`. If rewriting fails, the question is asked as written. `/query` has no history, so it answers each question on its own.
+- **Clearing the store:** `reset` on `/ingest` deletes every user's documents, so the API answers `403` unless `RAG_ALLOW_STORE_RESET=true`.
+- **Passwords and sessions:** Passwords are hashed with scrypt. Sessions use an `HttpOnly`, `SameSite=Strict` cookie, and only a hash of the token is stored. Five wrong passwords lock an account for five minutes. One address also gets 20 failed sign-ins or registrations per five minutes (`RAG_AUTH_IP_MAX_ATTEMPTS`, `RAG_AUTH_IP_WINDOW_SECONDS`). Behind a proxy, set `FORWARDED_ALLOW_IPS` so the app sees real client addresses; otherwise everyone shares the proxy's limit.
 - **Backups:** Back up `data/chat.db`, using `sqlite3 data/chat.db ".backup backup.db"` rather than copying the file while the server runs.
 - **Scaling:** SQLite is safe for several workers on one host. It must not sit on a network share, so replicas on separate hosts need a database server first.
 
@@ -228,6 +230,7 @@ Citation support is a word-overlap heuristic, so it can catch a misattributed ci
 - **Query Embedding Cache** — An in-process LRU cache (`RAG_EMBEDDING_QUERY_CACHE_SIZE`, default 256) avoids re-running the embedding model for repeated queries. It matches the exact query text, so a paraphrase is a miss. Hit/miss counts are in `/stats`, not `/metrics`.
 - **Cross-Encoder Reranking (opt-in)** — Reorders retrieved chunks before generation, on either vector or hybrid results. Enable with `"use_reranker": true`. The default model is `cross-encoder/ms-marco-MiniLM-L-6-v2`, chosen for its small size (about 80 MB) because reranking runs on one CPU thread. It was trained on English; for German or Spanish corpora, consider setting `RAG_RERANKER_MODEL=BAAI/bge-reranker-v2-m3`.
 - **Multilingual Routing** — `langdetect` runs per chunk at ingest and per query, routing to per-language ChromaDB collections (en/de/es; anything else falls back to `en`), with prompts translated via gettext. A query searches only its detected language's collection, so a German question will not find English documents.
+- **MCP Tool Exposure** — Deploy the RAG service as an MCP server for agent use, exposing `search_knowledge_base` and, optionally, `ask_knowledge_base`; ingestion and admin operations remain private.
 - **SSE Token Streaming** — `/query/stream` endpoint delivers tokens over Server-Sent Events as they are generated; compatible with any EventSource client.
 - **Background Ingestion** — `POST /ingest/async` queues a job and returns a `job_id` immediately (202). Jobs stream through a collection a batch at a time, report progress and per-file failures, and can be cancelled or resumed. The UI shows them live. See [Background indexing](#background-indexing).
 - **LLM Backends** — OpenAI or Anthropic via `RAG_LLM_PROVIDER`, chosen at startup, with streaming for both. Provider-qualified model names or an `sk-or-` key route the OpenAI client to OpenRouter (`RAG_OPENROUTER_MODE` overrides this).
@@ -240,7 +243,7 @@ Citation support is a word-overlap heuristic, so it can catch a misattributed ci
 - **Context Budget** — `RAG_MAX_CONTEXT_CHARS` (default 12000) caps the context sent to the LLM as a cost guardrail. Passages past the budget are dropped, and the last one that fits is cut at the character limit, which can be mid-sentence.
 - **Security Hardening** — Path-traversal guards on `/ingest`, BM25 index stored as plain integer arrays loaded with `allow_pickle=False` (no pickle), 0o600 file permissions on data files, `re.escape()` on pricing pattern matching to prevent ReDoS.
 - **Docker Multi-Stage Build** — `deps → model-cache → runtime` stages; non-root user, with the default embedding and reranker models cached in the image. The image and compose stack have not been run end to end yet; see [known gaps](#known-gaps-to-close-before-production).
-- **Tests and CI** — 522 unit, integration, and stress tests (LLM calls mocked; no API keys needed). GitHub Actions workflows cover CI, the evaluation gate (skipped when the `OPENAI_API_KEY` secret is absent), and GHCR publish on every push to `master`.
+- **Tests and CI** — 557 unit, integration, and stress tests (LLM calls mocked; no API keys needed). GitHub Actions workflows cover CI, the evaluation gate (skipped when the `OPENAI_API_KEY` secret is absent), and GHCR publish on every push to `master`.
 
 ---
 
@@ -454,6 +457,9 @@ All settings use the `RAG_` prefix and can be set via `.env` or environment vari
 | `RAG_API_KEY`                    | *(unset)*                              | Bearer token for API auth (disabled when unset)             |
 | `RAG_CHAT_DB_PATH`               | `<RAG_DATA_DIR>/chat.db`               | SQLite file for accounts and chats; use a local disk        |
 | `RAG_ALLOW_SIGNUP`               | `true`                                 | Let anyone who can reach the server register                |
+| `RAG_ALLOW_STORE_RESET`          | `false`                                | Let `reset` on `/ingest` delete every user's documents      |
+| `RAG_AUTH_IP_MAX_ATTEMPTS`       | `20`                                   | Failed sign-ins and registrations per address per window    |
+| `RAG_AUTH_IP_WINDOW_SECONDS`     | `300`                                  | Length of that window                                       |
 | `RAG_SESSION_TTL_HOURS`          | `720`                                  | How long a login lasts                                      |
 | `RAG_SESSION_COOKIE_SECURE`      | `false`                                | Force `Secure` cookies; automatic on direct HTTPS requests  |
 | `RAG_LOG_LEVEL`                  | `INFO`                                 | Logging level                                               |
@@ -623,7 +629,7 @@ docker run -p 8000:8000 \
 docker compose up --build
 ```
 
-This starts the API and a private Chroma server. Compose reads the `RAG_LLM_*`, `RAG_API_KEY`, `RAG_CORS_ORIGINS`, `MONITOR_ENABLED`, and provider key values from your `.env` for substitution. On Linux hosts, `./data` must be writable by UID 1001, the user the API runs as.
+This starts the API and a private Chroma server. For agent deployments, expose the service through MCP with `search_knowledge_base` and optional `ask_knowledge_base`; keep ingestion and admin operations private. Compose reads the `RAG_LLM_*`, `RAG_API_KEY`, `RAG_CORS_ORIGINS`, `MONITOR_ENABLED`, and provider key values from your `.env` for substitution. On Linux hosts, `./data` must be writable by UID 1001, the user the API runs as.
 
 ---
 
@@ -722,9 +728,8 @@ The drill uses real API and Chroma server processes on loopback, a local fake LL
 
 **Accounts**
 
-- **Documents are shared between accounts.** Any user's questions can retrieve any user's uploaded PDFs, and `/ingest` with `reset: true` still clears the store for everyone.
 - **No self-service password reset.** An operator resets passwords with `scripts/manage_users.py`.
-- **Login throttling is per account, not per IP**, so one client can try one password against many accounts, or keep a known account locked.
+- **Login limits are per replica.** Each process keeps its own per-address count.
 
 **Defaults to change for a real deployment**
 

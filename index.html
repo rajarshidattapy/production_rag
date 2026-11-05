@@ -328,7 +328,7 @@ request('/auth/me',{headers:headers()}).then(signedIn).catch(error=>showAuth(err
       if (rejected.length) notice(`Not uploaded: ${rejected.join('; ')}`, true);
       if (directory) {
         const chat = await startChatForJob(title);
-        // Never reset here: the document store is shared, so that would delete other users' PDFs.
+        // Never reset here: that would delete other users' PDFs, and the server refuses it by default.
         await postJson('/ingest/async', {source: directory, label: title, chat_id: chat.id});
         await refreshJobs();
       }

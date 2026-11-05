@@ -38,11 +38,12 @@ from prometheus_client import (
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from src.chat.rate_limit import AttemptLimiter
 from src.chat.store import AccountLockedError, ChatStore, User, UsernameTakenError
 from src.config import settings as _settings
 from src.generation.citations import CitationFormatter
 from src.healing.metrics import HEALING_REGISTRY
-from src.pipeline import IngestProgress, RAGPipeline
+from src.pipeline import SHARED_OWNER, IngestProgress, RAGPipeline, retrieval_owners
 from src.retrieval.vector_store import VectorStoreUnavailableError
 from src.utils.i18n import _
 
@@ -511,6 +512,21 @@ def metrics() -> Response:
     )
 
 
+def _refuse_reset_unless_allowed(reset: bool) -> None:
+    """``reset`` deletes every user's documents, so it stays off unless an operator enables it."""
+    if reset and not _settings.allow_store_reset:
+        raise HTTPException(
+            status_code=403,
+            detail="Clearing the document store is turned off (RAG_ALLOW_STORE_RESET).",
+        )
+
+
+def _visible_owners(rag_session: str | None) -> tuple[str, ...]:
+    """Documents a request may read: shared ones, plus the signed-in user's own."""
+    user = _user_for_session(rag_session)
+    return (SHARED_OWNER, user.id) if user else (SHARED_OWNER,)
+
+
 def _resolve_ingest_source(source: str) -> Path:
     """Validate and resolve an ingest source path, confined to the data directory.
 
@@ -597,20 +613,25 @@ async def upload_pdf(
 
 
 @app.post("/ingest", response_model=IngestResponse, dependencies=[_auth])
-async def ingest(request: IngestRequest) -> IngestResponse:
+async def ingest(request: IngestRequest, rag_session: str | None = Cookie(None)) -> IngestResponse:
     """Ingest documents from a file or directory into the vector store.
 
     Blocks for the full duration of ingestion. For large corpora that risk
-    client/proxy timeouts, use ``POST /ingest/async`` instead.
+    client/proxy timeouts, use ``POST /ingest/async`` instead. Documents added while signed
+    in belong to that user; otherwise they are shared with everyone.
     """
+    _refuse_reset_unless_allowed(request.reset)
     source_path = _resolve_ingest_source(request.source)
     pipeline = get_pipeline()
+    user = await asyncio.to_thread(_user_for_session, rag_session)
 
     if request.reset:
         await asyncio.to_thread(pipeline.reset)
 
     try:
-        chunks_ingested = await asyncio.to_thread(pipeline.ingest, source_path)
+        chunks_ingested = await asyncio.to_thread(
+            pipeline.ingest, source_path, owner=user.id if user else None
+        )
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -758,7 +779,7 @@ def _note_ingest_result_in_chat(job_id: str, status: str, progress: IngestProgre
         logger.exception("Could not note ingest job %s in its chat", job_id)
 
 
-def _run_ingest_job(job_id: str, source_path: Path, reset: bool) -> None:
+def _run_ingest_job(job_id: str, source_path: Path, reset: bool, owner: str | None) -> None:
     stop = _active_ingest_jobs[job_id]
     latest = IngestProgress()
     last_saved = 0.0
@@ -787,7 +808,7 @@ def _run_ingest_job(job_id: str, source_path: Path, reset: bool) -> None:
         if reset:
             pipeline.reset()
         chunks_ingested = pipeline.ingest(
-            source_path, on_progress=on_progress, should_stop=stop.is_set
+            source_path, on_progress=on_progress, should_stop=stop.is_set, owner=owner
         )
         total_chunks = pipeline.stats()["chunks_in_store"]
         status = stopped_status() if latest.stopped else "completed"
@@ -814,7 +835,7 @@ def _enqueue_ingest_job(source_path: Path, reset: bool = False, **fields: Any) -
     _record_ingest_job(
         job_id, status="pending", source=str(source_path), created_at=time.time(), **fields
     )
-    _ingest_worker.submit(_run_ingest_job, job_id, source_path, reset)
+    _ingest_worker.submit(_run_ingest_job, job_id, source_path, reset, fields.get("user_id"))
     return job_id
 
 
@@ -852,6 +873,7 @@ async def ingest_async(
     with a 400 rather than surfacing as an async job failure. Jobs run one at a
     time in the order they arrive. Text is searchable as each batch is stored.
     """
+    _refuse_reset_unless_allowed(request.reset)
     source_path = _resolve_ingest_source(request.source)
 
     user = await asyncio.to_thread(_user_for_session, rag_session)
@@ -926,7 +948,9 @@ def retry_ingest_job(job_id: str, rag_session: str | None = Cookie(None)) -> Ing
     response_model_exclude_none=True,
     dependencies=[_auth],
 )
-async def query(request: QueryRequest, response: Response) -> QueryResponse:
+async def query(
+    request: QueryRequest, response: Response, rag_session: str | None = Cookie(None)
+) -> QueryResponse:
     """Answer a question using the RAG pipeline.
 
     With self-healing enabled (per request or server default), the answer is
@@ -937,6 +961,7 @@ async def query(request: QueryRequest, response: Response) -> QueryResponse:
 
     tracker = UsageTracker()
     token = request_usage.set(tracker)
+    owners_token = retrieval_owners.set(await asyncio.to_thread(_visible_owners, rag_session))
 
     try:
         pipeline = get_pipeline()
@@ -992,14 +1017,15 @@ async def query(request: QueryRequest, response: Response) -> QueryResponse:
 
         return QueryResponse(answer=answer, citations=citation_responses, healing=healing)
     finally:
+        retrieval_owners.reset(owners_token)
         request_usage.reset(token)
 
 
 @app.get("/chunks/{chunk_id}", response_model=ChunkResponse, dependencies=[_auth])
-def get_chunk(chunk_id: str) -> ChunkResponse:
+def get_chunk(chunk_id: str, rag_session: str | None = Cookie(None)) -> ChunkResponse:
     """Return the full text of a passage, for expanding a citation's short ``text_snippet``."""
     chunk = get_pipeline().get_chunk(chunk_id)
-    if chunk is None:
+    if chunk is None or chunk["metadata"].get("owner") not in _visible_owners(rag_session):
         raise HTTPException(
             status_code=404, detail="This passage is no longer in the document store."
         )
@@ -1009,12 +1035,13 @@ def get_chunk(chunk_id: str) -> ChunkResponse:
 # ---------------------------------------------------------------------------
 # Accounts and chat history. Login uses a cookie because the Authorization header
 # already carries RAG_API_KEY, and HttpOnly keeps the token away from page scripts.
-# Accounts own chat history only: /query, /upload, and /ingest stay open to anyone who
-# passes the API key check, and documents are shared by every user.
+# /query, /upload, and /ingest stay open to anyone who passes the API key check, but a
+# caller who isn't signed in can only read and add shared documents.
 # ---------------------------------------------------------------------------
 _SESSION_COOKIE = "rag_session"
 _chat_store: ChatStore | None = None
 _chat_store_lock = threading.Lock()
+_auth_limiter = AttemptLimiter()
 
 
 def get_chat_store() -> ChatStore:
@@ -1035,6 +1062,22 @@ def _current_user(rag_session: str | None = Cookie(None)) -> User:
 
 
 _signed_in = Depends(_current_user)
+
+
+def _client_address(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _refuse_if_too_many_attempts(address: str) -> None:
+    """Checked before any password hashing, which is deliberately expensive."""
+    if _auth_limiter.blocked(
+        address, _settings.auth_ip_max_attempts, _settings.auth_ip_window_seconds
+    ):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many attempts from this address. Try again in a few minutes.",
+            headers={"Retry-After": str(int(_settings.auth_ip_window_seconds))},
+        )
 
 
 def _start_session(user: User, request: Request, response: Response) -> None:
@@ -1093,6 +1136,8 @@ class ChatFilesRequest(BaseModel):
 
 class ChatTurnResponse(QueryResponse):
     chat: ChatSummary
+    # What was actually searched for, when a follow-up had to be rewritten to stand alone.
+    searched_for: str | None = None
 
 
 class ImportedMessage(BaseModel):
@@ -1124,6 +1169,9 @@ def register(body: RegisterRequest, request: Request, response: Response) -> Acc
             status_code=400,
             detail=f"Password must be at least {_settings.min_password_length} characters.",
         )
+    address = _client_address(request)
+    _refuse_if_too_many_attempts(address)
+    _auth_limiter.record(address)
     try:
         user = get_chat_store().create_user(body.username, body.password)
     except UsernameTakenError:
@@ -1134,14 +1182,18 @@ def register(body: RegisterRequest, request: Request, response: Response) -> Acc
 
 @app.post("/auth/login", response_model=AccountResponse, dependencies=[_auth])
 def login(body: LoginRequest, request: Request, response: Response) -> AccountResponse:
-    """Sign in. Repeated wrong passwords lock the account for a few minutes."""
+    """Sign in. Repeated failures block the account and the address for a few minutes."""
+    address = _client_address(request)
+    _refuse_if_too_many_attempts(address)
     try:
         user = get_chat_store().authenticate(body.username, body.password)
     except AccountLockedError:
+        _auth_limiter.record(address)
         raise HTTPException(
             status_code=429, detail="Too many failed attempts. Try again in a few minutes."
         ) from None
     if user is None:
+        _auth_limiter.record(address)
         raise HTTPException(status_code=401, detail="Wrong username or password.")
     _start_session(user, request, response)
     return AccountResponse(username=user.username)
@@ -1230,6 +1282,21 @@ def add_chat_files(chat_id: str, body: ChatFilesRequest, user: User = _signed_in
     return chat
 
 
+async def _standalone_question(question: str, messages: list[dict[str, Any]]) -> str:
+    """Rewrite a follow-up using the chat so far. If that fails, ask the question as written."""
+    if not question or not any(m["role"] == "user" for m in messages):
+        return question
+    try:
+        rewritten = await asyncio.wait_for(
+            get_pipeline().generator.condense_question(question, messages), _query_timeout()
+        )
+    except Exception as exc:
+        logger.warning("Could not rewrite a follow-up question: %s", exc)
+        return question
+    rewritten = rewritten.strip()
+    return rewritten if 0 < len(rewritten) <= RAGPipeline.MAX_QUESTION_LENGTH else question
+
+
 @app.post(
     "/chats/{chat_id}/messages",
     response_model=ChatTurnResponse,
@@ -1237,31 +1304,45 @@ def add_chat_files(chat_id: str, body: ChatFilesRequest, user: User = _signed_in
     dependencies=[_auth],
 )
 async def send_chat_message(
-    chat_id: str, body: QueryRequest, response: Response, user: User = _signed_in
+    chat_id: str,
+    body: QueryRequest,
+    response: Response,
+    user: User = _signed_in,
+    rag_session: str | None = Cookie(None),
 ) -> ChatTurnResponse:
     """Ask a question in a chat and save it with its answer.
 
-    Both are saved together once the answer exists, so a failed query leaves the history
-    unchanged. Answers don't use earlier messages: each question is retrieved on its own.
+    A follow-up is first rewritten to stand alone using the chat so far, so that retrieval
+    and generation understand it. The question and answer are saved together once the answer
+    exists, so a failed query leaves the history unchanged.
     """
     store = get_chat_store()
-    if not await asyncio.to_thread(store.chat_exists, user.id, chat_id):
+    existing = await asyncio.to_thread(store.get_chat, user.id, chat_id)
+    if existing is None:
         raise HTTPException(status_code=404, detail="No chat found with that ID.")
 
-    result = await query(body, response)
+    asked = body.question.strip()
+    standalone = await _standalone_question(asked, existing["messages"])
+    result = await query(
+        body.model_copy(update={"question": standalone}), response, rag_session=rag_session
+    )
 
     chat = await asyncio.to_thread(
         store.add_exchange,
         user.id,
         chat_id,
-        body.question.strip(),
+        asked,
         result.answer,
         [c.model_dump(exclude_none=True) for c in result.citations],
         result.healing.model_dump(mode="json", exclude_none=True) if result.healing else None,
     )
     if chat is None:  # deleted while the answer was being generated
         raise HTTPException(status_code=404, detail="No chat found with that ID.")
-    return ChatTurnResponse(**result.model_dump(), chat=ChatSummary(**chat))
+    return ChatTurnResponse(
+        **result.model_dump(),
+        chat=ChatSummary(**chat),
+        searched_for=standalone if standalone != asked else None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1282,7 +1363,9 @@ async def _next_event(events: AsyncGenerator[tuple[str, Any], None]) -> tuple[st
 
 
 @app.post("/query/stream", dependencies=[_auth])
-async def query_stream(request: QueryRequest) -> StreamingResponse:
+async def query_stream(
+    request: QueryRequest, rag_session: str | None = Cookie(None)
+) -> StreamingResponse:
     """Answer a question and stream tokens via Server-Sent Events (SSE).
 
     Clients should connect with ``Accept: text/event-stream``.
@@ -1306,9 +1389,12 @@ async def query_stream(request: QueryRequest) -> StreamingResponse:
     """
     pipeline = get_pipeline()
     timeout = _query_timeout()
+    owners = await asyncio.to_thread(_visible_owners, rag_session)
 
     async def _event_stream() -> AsyncGenerator[str, None]:
         deadline = None if timeout is None else time.monotonic() + timeout
+        # Set here because the body runs while the response is sent, after this route returns.
+        retrieval_owners.set(owners)
         try:
             question = request.question.strip()
             if not question:

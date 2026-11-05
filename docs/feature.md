@@ -14,9 +14,10 @@ Roughly in the order they will hurt. Each says how it was confirmed: *reproduced
 
 **Hybrid search (BM25)**
 
+- **The owner filter costs more as the corpus grows.** Each hybrid query fetches every chunk ID the user may read, then checks the whole index against them in Python, because the index holds no metadata. Store owners in the index, or give large tenants their own collections. *From the code.*
 - **A cold BM25 build blocks every query**, including vector-only ones in other languages, because it holds the pipeline lock while it builds. Build outside that lock. *Reproduced: another language's store waited out the whole build.*
 - **Scoring runs inside the index lock and scans an array per query**, so hybrid queries run one at a time per language in each process. *Measured: 4.8 ms at 100k chunks, 62 ms at 1M, which caps it near 16 queries per second.*
-- **Replicas rebuild the whole index when another replica ingests**, because staleness is detected by chunk count. This gets worse as the corpus grows, and the page filter adds a per-query Python scan too. Needs a shared search index, or syncing only the new chunks. *Reproduced: 4 full rebuilds during an 18 s ingest.*
+- **Replicas rebuild the whole index when another replica ingests**, because staleness is detected by chunk count. This gets worse as the corpus grows. Needs a shared search index, or syncing only the new chunks. *Reproduced: 4 full rebuilds during an 18 s ingest.*
 - **The persisted index has a 500 MB cap** (`RAG_BM25_MAX_INDEX_MB`, roughly 500k chunks). Past that it isn't saved, so every restart rebuilds it. *From the code.*
 
 **Indexing**
@@ -34,6 +35,7 @@ Roughly in the order they will hurt. Each says how it was confirmed: *reproduced
 
 **Moving to several servers**
 
+- **Login limits are counted per process**, so each replica allows its own 20 attempts. A shared store such as Redis, or limits at the proxy, would fix it. *From the code.*
 - **Use a Chroma server in production, not embedded Chroma.** Embedded 1.5.9 sometimes can't read a freshly written collection, and only a new client clears it ([upstream issue](https://github.com/chroma-core/chroma/issues/7946)). The app now reopens the client automatically, at most every 30 s, but each reopen leaves the old client in memory until it can be collected. The `docker-compose.yml` setup already uses a server. *Reproduced: 6 of 204 attempts embedded, 0 of 84 on a server.*
 - **SQLite and** `ingest_jobs.json` **tie the app to one host.** API replicas on separate machines need a database server for accounts, chats, and jobs. *From the code.*
 - **Job status is a whole file, read on every poll** and rewritten on every save, holding up to 500 jobs. Move it to the database. *From the code.*
@@ -44,6 +46,10 @@ Roughly in the order they will hurt. Each says how it was confirmed: *reproduced
 
 
 ## Additional features to add to Production RAG
+
+### - MCP
+
+When deploying, expose the RAG service as an MCP server with `search_knowledge_base` (required) and `ask_knowledge_base` (optional, grounded answer with citations); keep ingestion and admin operations private.
 
 ### Security and data protection
 
@@ -74,7 +80,6 @@ Roughly in the order they will hurt. Each says how it was confirmed: *reproduced
 19. Missing improvement: Temporal Retrieval — Prefer current document versions and distinguish historical information from the latest available facts.
 20. Missing improvement: Adaptive Search Weight Calibration — Tune BM25 and vector search weights against a representative evaluation dataset instead of relying on fixed defaults.
 21. Missing improvement: Retrieval Regression Testing — Track Recall@K, Precision@K, MRR, and NDCG to detect retrieval-quality regressions after code or model changes.
-22. Missing improvement: Conversation-Aware Retrieval — Resolve references such as "that document" and "the previous method" using relevant conversation context.
 
 ### Self-healing and answer verification
 
@@ -154,6 +159,7 @@ Vultr's automatic backups add 20%, about $4 to$5. A domain is roughly $1 a month
        command: caddy reverse-proxy --from rag.example.com --to api:8000
        volumes: [caddy_data:/data]
    ```
+   Also set `FORWARDED_ALLOW_IPS=*` in `.env`, but only once port 8000 isn't published. Without it, every user shares Caddy's address and one login limit.
 3. **Pull the image instead of building on the VM.** Replace `build:` with the image the publish workflow pushes to GHCR. Building on a 4 GB VM is slow, because it downloads PyTorch and the models.
 4. **Give shutdown time to finish** with `stop_grace_period: 90s` on `api`. The Docker default of 10 s can cut off an indexing batch. That's recoverable with Run again, but it's avoidable.
 5. 

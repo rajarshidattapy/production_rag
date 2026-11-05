@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,26 @@ def isolate_chroma_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
 
     monkeypatch.setattr(settings, "chroma_path", tmp_path / "test_chroma_rag")
     monkeypatch.setattr(settings, "data_dir", tmp_path)
+    monkeypatch.setattr(settings, "allow_store_reset", True)
+
+
+@pytest.fixture(autouse=True)
+def fresh_login_limits() -> None:
+    """Every test client shares one address, so attempts would otherwise add up across tests."""
+    api = sys.modules.get("src.api")
+    if api is not None:
+        api._auth_limiter.clear()
+
+
+@pytest.fixture(autouse=True)
+def no_real_follow_up_rewrites(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never reach a real LLM from a developer's .env. Tests of rewriting patch this themselves."""
+    from src.generation.generator import Generator
+
+    async def unchanged(self: Generator, question: str, history: list[dict]) -> str:
+        return question
+
+    monkeypatch.setattr(Generator, "condense_question", unchanged)
 
 
 @pytest.fixture(autouse=True)

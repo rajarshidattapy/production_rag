@@ -28,6 +28,25 @@ logger = logging.getLogger(__name__)
 
 _SUPPORTED_LANGUAGES: frozenset[str] = frozenset(["en", "de", "es"])
 
+# Owner of documents added without an account. Everyone can read them.
+SHARED_OWNER = "shared"
+# Whose documents retrieval may read during this request. The API always sets it. ``None``
+# means no restriction, for trusted in-process callers such as the CLI and evaluation. A
+# context variable reaches every retrieval path, including worker threads and healing retries.
+retrieval_owners: contextvars.ContextVar[tuple[str, ...] | None] = contextvars.ContextVar(
+    "retrieval_owners", default=None
+)
+
+
+def _within_visible_owners(where: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Narrow a metadata filter to the documents this request may read."""
+    owners = retrieval_owners.get()
+    if owners is None:
+        return where
+    scope: dict[str, Any] = {"owner": {"$in": list(owners)}}
+    return scope if where is None else {"$and": [scope, where]}
+
+
 # Chunks embedded and stored per step of an ingest. It sets how soon new text is searchable,
 # how often progress moves, and how long a request to stop can take to be noticed.
 _INGEST_STEP_CHUNKS = 256
@@ -174,6 +193,7 @@ class RAGPipeline:
         source: Path | str,
         on_progress: Callable[[IngestProgress], None] | None = None,
         should_stop: Callable[[], bool] | None = None,
+        owner: str | None = None,
     ) -> int:
         """Load, chunk, and index documents from a file or directory.
 
@@ -189,6 +209,7 @@ class RAGPipeline:
             source: Path to a file or directory.
             on_progress: Called with running totals as the work advances.
             should_stop: Checked between batches. When true, chunks stored so far stay.
+            owner: The user these documents belong to. Without one they are shared.
 
         Returns:
             Number of chunks newly added.
@@ -207,7 +228,12 @@ class RAGPipeline:
                 break
             name = path.name if path == root else str(path.relative_to(root))
             try:
-                chunks = self.chunker.chunk(self.loader._load_file(path))
+                document = self.loader._load_file(path)
+                document.metadata["owner"] = owner or SHARED_OWNER
+                if owner:
+                    # Two users can add the same file and must each get their own copy.
+                    document.doc_id = f"{owner}/{document.doc_id}"
+                chunks = self.chunker.chunk(document)
             except Exception as exc:
                 if path == root:
                     raise
@@ -591,8 +617,10 @@ class RAGPipeline:
         """
         k = top_k or self.config.top_k_final
         where = page_filter(question)
+        paged = _within_visible_owners({"page": {"$gte": 1}})
         if where is None or not any(
-            self._get_vector_store(lang).has_paged_chunks() for lang in sorted(_SUPPORTED_LANGUAGES)
+            self._get_vector_store(lang).has_paged_chunks(paged)
+            for lang in sorted(_SUPPORTED_LANGUAGES)
         ):
             return k, None
         return max(k, self.config.top_k_retrieval), where
@@ -655,13 +683,17 @@ class RAGPipeline:
             fetch_k = self.config.top_k_retrieval if use_reranker else k
 
         if where is not None:
-            return self._retrieve_pages(query, where, use_hybrid, fetch_k, alpha)
+            scoped = _within_visible_owners(where)
+            assert scoped is not None
+            return self._retrieve_pages(query, scoped, use_hybrid, fetch_k, alpha)
 
+        visible = _within_visible_owners()
+        options: dict[str, Any] = {} if visible is None else {"where": visible}
         if use_hybrid:
-            if alpha is None:
-                return self._get_hybrid_retriever(lang).search(query, k=fetch_k)
-            return self._get_hybrid_retriever(lang).search(query, k=fetch_k, alpha=alpha)
-        return self._get_vector_store(lang).similarity_search(query, k=fetch_k)
+            if alpha is not None:
+                options["alpha"] = alpha
+            return self._get_hybrid_retriever(lang).search(query, k=fetch_k, **options)
+        return self._get_vector_store(lang).similarity_search(query, k=fetch_k, **options)
 
     def _apply_context_budget(
         self, contexts: list[dict[str, Any]], budget: int | None = None

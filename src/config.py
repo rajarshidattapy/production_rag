@@ -123,6 +123,12 @@ class Settings(BaseSettings):
     # Always set on requests that arrive over HTTPS. Turn on when a proxy terminates
     # TLS and forwards plain HTTP, since the app can't see the original scheme there.
     session_cookie_secure: bool = False
+    # Sign-ins and registrations from one address. Behind a proxy this needs uvicorn's
+    # FORWARDED_ALLOW_IPS, or every user shares the proxy's address and this one limit.
+    auth_ip_max_attempts: int = Field(default=20, ge=1)
+    auth_ip_window_seconds: float = Field(default=300.0, gt=0)
+    # `reset` on /ingest deletes every user's documents, so the API refuses it unless enabled.
+    allow_store_reset: bool = False
 
     # ---------- Logging ----------
     log_level: str = "INFO"

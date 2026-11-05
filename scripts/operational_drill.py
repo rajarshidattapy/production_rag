@@ -263,6 +263,7 @@ class Harness:
             RAG_LLM_PROVIDER="openai",
             RAG_LLM_MODEL="gpt-4o-mini",
             RAG_API_KEY="",
+            RAG_ALLOW_STORE_RESET="true",
             RAG_SELF_HEALING_ENABLED="false",
             MONITOR_ENABLED="false",
             OPENAI_API_KEY="drill-not-a-real-key",

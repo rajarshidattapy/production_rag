@@ -397,11 +397,12 @@ class VectorStore:
             found.update(self._collection_call(_get).get("ids") or [])
         return found
 
-    def has_paged_chunks(self) -> bool:
-        """Whether any chunk records the page it came from."""
+    def has_paged_chunks(self, where: dict[str, Any] | None = None) -> bool:
+        """Whether any chunk matching ``where`` records the page it came from."""
+        paged = where or {"page": {"$gte": 1}}
 
         def _get(collection: Any):
-            return collection.get(where={"page": {"$gte": 1}}, include=[], limit=1)
+            return collection.get(where=paged, include=[], limit=1)
 
         return bool(self._collection_call(_get).get("ids"))
 
