@@ -481,6 +481,8 @@ All settings use the `RAG_` prefix and can be set via `.env` or environment vari
 | `RAG_CHROMA_PATH`                | `data/chroma_db`                       | ChromaDB persistence directory                              |
 | `RAG_CHUNK_SIZE`                 | `800`                                  | Target chunk size in characters                             |
 | `RAG_CHUNK_OVERLAP`              | `150`                                  | Overlap between adjacent chunks                             |
+| `RAG_SEMANTIC_DEDUPLICATION`     | `true`                                 | Skip duplicate chunks from another document owned by the same user |
+| `RAG_SEMANTIC_DEDUPLICATION_THRESHOLD` | `0.985`                         | Minimum embedding similarity for near-duplicate suppression |
 | `RAG_TOP_K_RETRIEVAL`            | `20`                                   | Candidates fetched before reranking                         |
 | `RAG_TOP_K_FINAL`                | `5`                                    | Final context chunks passed to the LLM                      |
 | `RAG_MAX_CONTEXT_CHARS`          | `12000`                                | Total context characters sent to the LLM (`0` disables)     |

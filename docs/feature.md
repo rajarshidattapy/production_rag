@@ -8,11 +8,6 @@
 - **Document Structure Awareness:** Preserve headings, sections, paragraphs, and hierarchical relationships during parsing and chunking. Markdown headings are now recorded as each chunk's `section`; PDF and plain-text structure isn't.
 - **Table-Aware Extraction:** Preserve table headers, rows, columns, and cell relationships instead of flattening tables into ambiguous text.
 
-**Chunks and metadata**
-
-- **Chunk Metadata Validation:** Enforce a consistent metadata schema for document IDs, page numbers, sections, ownership, and source references.
-- **Semantic Deduplication:** Identify duplicate and near-duplicate documents or chunks to reduce redundant storage and retrieval noise.
-
 **Updating and removing documents**
 
 - **Documents can't be deleted or updated.** There's no route for it (`delete_chunks` is unused), and an edited file adds new chunks beside the old ones, so answers can cite stale text. Needs a document table that tracks each file's chunks. *From the code.*

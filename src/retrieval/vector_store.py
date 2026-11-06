@@ -422,6 +422,50 @@ class VectorStore:
             found.update(self._collection_call(_get).get("ids") or [])
         return found
 
+    def near_duplicate_matches(
+        self, chunks: list[Chunk], threshold: float, where: dict[str, Any] | None = None
+    ) -> dict[str, dict[str, Any]]:
+        """Return the best existing semantic match for each sufficiently similar chunk.
+
+        Embeddings are made as one batch, then queried directly so ingest does not make one
+        embedding-model call per chunk.  The caller decides whether matching documents should
+        be suppressed; this method only reports the evidence.
+        """
+        if not chunks:
+            return {}
+        vectors = self._embedding_fn.embed_document([chunk.content for chunk in chunks])
+
+        def _query(collection: Any) -> dict[str, Any]:
+            return collection.query(
+                query_embeddings=vectors,
+                n_results=1,
+                where=where,
+                include=["metadatas", "distances"],
+            )
+
+        results = self._collection_call(_query)
+        ids = results.get("ids") or []
+        metadatas = results.get("metadatas") or []
+        distances = results.get("distances") or []
+        matches: dict[str, dict[str, Any]] = {}
+        for index, chunk in enumerate(chunks):
+            result_ids = ids[index] if index < len(ids) else []
+            result_distances = distances[index] if index < len(distances) else []
+            if not result_ids or not result_distances:
+                continue
+            score = 1.0 - float(result_distances[0])
+            if score < threshold:
+                continue
+            result_metadata = (
+                metadatas[index][0] if index < len(metadatas) and metadatas[index] else {}
+            )
+            matches[chunk.chunk_id] = {
+                "id": result_ids[0],
+                "metadata": result_metadata,
+                "score": score,
+            }
+        return matches
+
     def has_paged_chunks(self, where: dict[str, Any] | None = None) -> bool:
         """Whether any chunk matching ``where`` records the page it came from."""
         paged = where or {"page": {"$gte": 1}}

@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     # Upper bound for each Chroma add() call during ingestion. The effective
     # value is also capped by Chroma's own advertised maximum.
     ingest_batch_size: int = Field(default=2000, ge=1)
+    # Drop chunks that repeat content already indexed from another document. Exact duplicates
+    # use content_fingerprint; near duplicates use the embedding model and this cosine-like
+    # similarity score. Keep the default high so overlapping chunks in one document survive.
+    semantic_deduplication: bool = True
+    semantic_deduplication_threshold: float = Field(default=0.985, ge=0.9, le=1.0)
 
     # Hybrid search (Phase 2)
     hybrid_alpha: float = 0.6  # weight for vector search (1.0 = pure vector, 0.0 = pure BM25)

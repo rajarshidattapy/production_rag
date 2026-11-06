@@ -26,6 +26,11 @@ from src.generation.generator import Generator
 from src.ingestion import screening
 from src.ingestion.chunker import Chunk, Chunker
 from src.ingestion.loader import Document, DocumentLoader
+from src.ingestion.metadata import (
+    annotate_content_fingerprints,
+    prepare_document_metadata,
+    validate_chunks,
+)
 from src.retrieval.vector_store import VectorStore
 from src.utils.page_query import page_filter
 
@@ -286,6 +291,9 @@ class RAGPipeline:
         report = (lambda: on_progress(progress)) if on_progress else (lambda: None)
         pending: dict[str, list[Chunk]] = {}
         pending_parents: list[Chunk] = []
+        # Exact-content fingerprints of chunks retained in this ingest. This catches repeated
+        # files before the first batch has reached Chroma.
+        seen_fingerprints: set[tuple[str, str]] = set()
         screened: list[tuple[str, str, str]] = []
         ingested_at = time.time()
         report()
@@ -308,6 +316,10 @@ class RAGPipeline:
                 )
                 parents, chunks = self.chunker.chunk_with_parents(document)
                 parents, chunks, excluded = self._flag_and_exclude(parents, chunks, name)
+                annotate_content_fingerprints([*parents, *chunks])
+                chunks = self._deduplicate_chunks(chunks, seen_fingerprints)
+                kept_parent_ids = {str(chunk.metadata["parent_id"]) for chunk in chunks}
+                parents = [parent for parent in parents if parent.chunk_id in kept_parent_ids]
             except Exception as exc:
                 if path == root:
                     raise
@@ -408,6 +420,7 @@ class RAGPipeline:
         # ingested again; the copies screened the old way are removed once those are stored.
         fingerprint = hashlib.md5(str(document.metadata["screening"]).encode()).hexdigest()[:8]
         document.doc_id = f"{document.doc_id}~{fingerprint}"
+        prepare_document_metadata(document)
         if found:
             document.metadata["redacted"] = sorted(found)
             logger.info("Redacted from %s: %s", name, dict(found))
@@ -509,6 +522,7 @@ class RAGPipeline:
             known = store.existing_ids([p.chunk_id for p in parents])
             fresh = [p for p in parents if p.chunk_id not in known]
             if fresh:
+                validate_chunks(fresh)
                 store.add_unsearchable(fresh)
             parents.clear()
         for lang, chunks in pending.items():
@@ -527,11 +541,78 @@ class RAGPipeline:
         fresh = [c for c in chunks if c.chunk_id not in known]
         if not fresh:
             return 0
+        validate_chunks(fresh)
         count = vs.add_chunks(fresh)
         # Keep the corresponding hybrid index current (appends; falls back to a rebuild)
         if lang in self._hybrid_retrievers:
             self._hybrid_retrievers[lang].add_chunks(fresh)
         return count
+
+    def _deduplicate_chunks(
+        self, chunks: list[Chunk], seen_fingerprints: set[tuple[str, str]]
+    ) -> list[Chunk]:
+        """Remove exact and near-duplicate chunks from other documents before indexing.
+
+        Exact duplicates are cheap metadata lookups. Near duplicates query the existing vector
+        collection in a batch, preserving chunks from the same logical document so chunk overlap
+        and a new document version cannot make a document incomplete.
+        """
+        grouped: dict[tuple[str, str], list[Chunk]] = {}
+        retained: list[Chunk] = []
+        exact_removed = 0
+        for chunk in chunks:
+            fingerprint = str(chunk.metadata["content_fingerprint"])
+            owner = str(chunk.metadata["owner"])
+            identity = (owner, fingerprint)
+            if identity in seen_fingerprints:
+                exact_removed += 1
+                continue
+            seen_fingerprints.add(identity)
+            grouped.setdefault((_detect_language(chunk.content), owner), []).append(chunk)
+
+        for (language, owner), candidates in grouped.items():
+            store = self._get_vector_store(language)
+            fingerprints = [str(chunk.metadata["content_fingerprint"]) for chunk in candidates]
+            existing_ids = store.ids_matching(
+                {"$and": [{"owner": owner}, {"content_fingerprint": {"$in": fingerprints}}]}
+            )
+            existing = store.get_chunks(sorted(existing_ids)) if existing_ids else []
+            known_fingerprints = {
+                str(row["metadata"].get("content_fingerprint")) for row in existing
+            }
+            fresh = [
+                chunk
+                for chunk in candidates
+                if str(chunk.metadata["content_fingerprint"]) not in known_fingerprints
+            ]
+            exact_removed += len(candidates) - len(fresh)
+            if not fresh or not self.config.semantic_deduplication:
+                retained.extend(fresh)
+                continue
+
+            matches = store.near_duplicate_matches(
+                fresh, self.config.semantic_deduplication_threshold, where={"owner": owner}
+            )
+            for chunk in fresh:
+                match = matches.get(chunk.chunk_id)
+                matched_metadata = (match or {}).get("metadata", {})
+                matched_document = matched_metadata.get("document_key")
+                if (
+                    match is not None
+                    and matched_metadata.get("owner") == owner
+                    and matched_document != chunk.metadata.get("document_key")
+                ):
+                    logger.info(
+                        "Skipped near-duplicate chunk %s (%.3f similar to %s)",
+                        chunk.chunk_id,
+                        match["score"],
+                        match["id"],
+                    )
+                    continue
+                retained.append(chunk)
+        if exact_removed:
+            logger.info("Skipped %d exact duplicate chunks", exact_removed)
+        return retained
 
     # ------------------------------------------------------------------
     # Query
