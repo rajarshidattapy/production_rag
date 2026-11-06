@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -112,6 +112,13 @@ class Settings(BaseSettings):
     # Loading the cross-encoder is expensive; only turn it on during healing
     # retries when explicitly allowed.
     healing_rerank_on_retry: bool = False
+
+    # ---------- Document versions and authority ----------
+    # How far to trust each source, 0 to 100, for resolving conflicts between documents.
+    # Keys are folders inside data_dir, as JSON, e.g. {"policies": 90, "uploads": 30}.
+    # The longest matching folder wins; anything else gets the default.
+    source_authority: dict[str, Annotated[int, Field(ge=0, le=100)]] = {}
+    default_source_authority: int = Field(default=50, ge=0, le=100)
 
     # ---------- Accounts and chat history ----------
     # SQLite file holding accounts and chats. Defaults to <data_dir>/chat.db.

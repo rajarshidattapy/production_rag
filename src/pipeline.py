@@ -5,6 +5,8 @@ from __future__ import annotations
 import contextvars
 import gettext
 import logging
+import re
+import time
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,7 +22,7 @@ from src.config import settings
 from src.generation.citations import Citation, CitationFormatter
 from src.generation.generator import Generator
 from src.ingestion.chunker import Chunk, Chunker
-from src.ingestion.loader import DocumentLoader
+from src.ingestion.loader import Document, DocumentLoader
 from src.retrieval.vector_store import VectorStore
 from src.utils.page_query import page_filter
 
@@ -36,6 +38,39 @@ SHARED_OWNER = "shared"
 retrieval_owners: contextvars.ContextVar[tuple[str, ...] | None] = contextvars.ContextVar(
     "retrieval_owners", default=None
 )
+
+
+# Browser uploads are saved as "<32 hex chars>_<original name>".
+_UPLOAD_PREFIX_RE = re.compile(r"^[0-9a-f]{32}_")
+
+
+def _source_authority(path: Path, data_dir: Path, rules: dict[str, int], default: int) -> int:
+    """Authority of the longest configured folder ``path`` is in, or the default."""
+    try:
+        parts = path.resolve().relative_to(data_dir.resolve()).parts
+    except ValueError:
+        return default
+    best, best_depth = default, -1
+    for folder, authority in rules.items():
+        key = tuple(p for p in Path(folder).parts if p not in ("", "."))
+        if parts[: len(key)] == key and len(key) > best_depth:
+            best, best_depth = authority, len(key)
+    return best
+
+
+def _document_key(path: Path, data_dir: Path, owner: str) -> str:
+    """What links versions of one document. Same owner and same name means same document.
+
+    Uploads get a fresh path each time, so they are matched by their original filename.
+    Files on the server are matched by their path inside the data directory.
+    """
+    try:
+        relative = path.resolve().relative_to(data_dir.resolve())
+    except ValueError:
+        relative = path.resolve()
+    if relative.parts[:1] == ("uploads",):
+        relative = Path("uploads") / _UPLOAD_PREFIX_RE.sub("", relative.name)
+    return f"{owner}:{relative.as_posix()}"
 
 
 def _within_visible_owners(where: dict[str, Any] | None = None) -> dict[str, Any] | None:
@@ -236,6 +271,7 @@ class RAGPipeline:
         report = (lambda: on_progress(progress)) if on_progress else (lambda: None)
         pending: dict[str, list[Chunk]] = {}
         pending_parents: list[Chunk] = []
+        ingested_at = time.time()
         report()
 
         for path in files:
@@ -245,10 +281,7 @@ class RAGPipeline:
             name = path.name if path == root else str(path.relative_to(root))
             try:
                 document = self.loader._load_file(path)
-                document.metadata["owner"] = owner or SHARED_OWNER
-                if owner:
-                    # Two users can add the same file and must each get their own copy.
-                    document.doc_id = f"{owner}/{document.doc_id}"
+                self._record_provenance(document, path, owner, ingested_at)
                 parents, chunks = self.chunker.chunk_with_parents(document)
             except Exception as exc:
                 if path == root:
@@ -276,6 +309,30 @@ class RAGPipeline:
         self._store_pending(pending, pending_parents, progress, report, 1)
         logger.info("Ingested %d chunks from %s", progress.chunks_ingested, source)
         return progress.chunks_ingested
+
+    def _record_provenance(
+        self, document: Document, path: Path, owner: str | None, ingested_at: float
+    ) -> None:
+        """Owner, version, timestamps, and authority, copied onto every chunk and parent.
+
+        The version is part of each chunk's ID, so an edited file is stored as a new version
+        beside the old one instead of being mistaken for chunks that are already stored.
+        """
+        meta = document.metadata
+        meta["owner"] = owner or SHARED_OWNER
+        meta["ingested_at"] = ingested_at
+        meta["document_key"] = _document_key(path, self.config.data_dir, str(meta["owner"]))
+        meta["authority"] = _source_authority(
+            path,
+            self.config.data_dir,
+            self.config.source_authority,
+            self.config.default_source_authority,
+        )
+        version = str(meta.get("content_hash", ""))[:16]
+        meta["version_id"] = version
+        # Two users can add the same file and must each get their own copy.
+        prefix = f"{owner}/" if owner else ""
+        document.doc_id = f"{prefix}{document.doc_id}@{version}"
 
     def _store_pending(
         self,

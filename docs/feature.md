@@ -21,12 +21,11 @@
 
 - **Chunk Metadata Validation:** Enforce a consistent metadata schema for document IDs, page numbers, sections, ownership, and source references.
 - **Semantic Deduplication:** Identify duplicate and near-duplicate documents or chunks to reduce redundant storage and retrieval noise.
-- **Document Provenance Tracking:** Track each document's origin, uploader, upload timestamp, content hash, version, and trust level.
 
 **Updating and removing documents**
 
 - **Documents can't be deleted or updated.** There's no route for it (`delete_chunks` is unused), and an edited file adds new chunks beside the old ones, so answers can cite stale text. Needs a document table that tracks each file's chunks. *From the code.*
-- **Document Versioning:** Maintain document versions and ensure updated files replace or supersede stale indexed content.
+- **Document Versioning:** Maintain document versions and ensure updated files replace or supersede stale indexed content. Each version is now recorded (`version_id`, `document_key`, `document_date`), and an edited file is stored beside the old one; nothing yet hides or removes the old version.
 - **Uploads are never cleaned up.** `data/uploads` only grows, even after a chat is deleted. *From the code.*
 - `/upload` **holds each file in memory**, up to 50 MB per concurrent upload. Stream to disk. *From the code.*
 
@@ -67,7 +66,7 @@
 **Choosing and shaping context**
 
 - **Parent-Child Retrieval:** Retrieve precise child chunks for relevance while supplying their larger parent sections for sufficient context. Ingestion already records each chunk's `parent_id` and stores the parent's text (`RAGPipeline.get_parents`), so this is retrieval-only work.
-- **Temporal Retrieval:** Prefer current document versions and distinguish historical information from the latest available facts.
+- **Temporal Retrieval:** Prefer current document versions and distinguish historical information from the latest available facts. The metadata it needs is already recorded on every chunk: `document_key`, `version_id`, `document_date`, and `ingested_at`.
 - **Context Compression:** Remove redundant passages and compress retrieved evidence while preserving information needed to answer accurately.
 - **Fine-Grained Authorization:** Enforce document-, collection-, and role-level permissions during retrieval, not merely at the API endpoint.
 
@@ -95,7 +94,7 @@
 - **Claim-Level Verification:** Break generated answers into atomic claims and independently verify each claim against its supporting retrieved evidence.
 - **Semantic Entailment Verification:** Use an entailment model or equivalent semantic check to determine whether evidence actually supports a claim beyond lexical overlap.
 - **Verifier Ensemble:** Combine deterministic validation, an LLM judge, and semantic verification to reduce dependence on a single evaluator.
-- **Source Conflict Resolution:** Detect contradictory documents and resolve conflicts using source authority, document versions, and timestamps.
+- **Source Conflict Resolution:** Detect contradictory documents and resolve conflicts using source authority, document versions, and timestamps. Chunks already carry `authority`, set per folder with `RAG_SOURCE_AUTHORITY`, plus versions and dates.
 - **Confidence Calibration:** Calibrate verifier confidence and acceptance thresholds using labelled examples rather than relying entirely on manually selected thresholds.
 
 **Repairing answers**

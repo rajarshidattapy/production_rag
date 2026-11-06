@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +22,35 @@ class Document:
     doc_id: str = ""
     # Text of each physical page, in order, for paginated formats. Empty otherwise.
     pages: list[str] = field(default_factory=list)
+
+
+def _file_facts(file_path: Path) -> dict[str, str | int | float]:
+    """Content hash and modification time. The date can be replaced by a better one later."""
+    digest = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            digest.update(block)
+    modified = file_path.stat().st_mtime
+    return {
+        "content_hash": digest.hexdigest(),
+        "file_modified_at": modified,
+        "document_date": modified,
+        "document_date_source": "file_modified",
+    }
+
+
+def _pdf_date(metadata: Any) -> float | None:
+    """The date a PDF says it was last changed or made. Uploads lose the file's own date."""
+    if metadata is None:
+        return None
+    for name in ("modification_date", "creation_date"):
+        try:
+            value = getattr(metadata, name)
+        except Exception:  # malformed dates raise when parsed
+            continue
+        if isinstance(value, datetime):
+            return (value if value.tzinfo else value.replace(tzinfo=UTC)).timestamp()
+    return None
 
 
 class DocumentLoader:
@@ -104,6 +136,7 @@ class DocumentLoader:
                 "source": str(file_path),
                 "filename": file_path.name,
                 "filetype": file_path.suffix.lower(),
+                **_file_facts(file_path),
             },
             doc_id=str(file_path),
         )
@@ -127,6 +160,13 @@ class DocumentLoader:
         pages = [page.extract_text() or "" for page in reader.pages]
 
         content = "\n\n".join(pages)
+        facts = _file_facts(file_path)
+        try:
+            pdf_date = _pdf_date(reader.metadata)
+        except Exception:
+            pdf_date = None
+        if pdf_date is not None:
+            facts.update(document_date=pdf_date, document_date_source="pdf_metadata")
         return Document(
             content=content,
             metadata={
@@ -134,6 +174,7 @@ class DocumentLoader:
                 "filename": file_path.name,
                 "filetype": ".pdf",
                 "pages": len(reader.pages),
+                **facts,
             },
             doc_id=str(file_path),
             pages=pages,
