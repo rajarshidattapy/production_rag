@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 import uuid
+import zlib
 from collections import OrderedDict
 from collections.abc import Callable
 from pathlib import Path
@@ -27,6 +28,9 @@ logger = logging.getLogger(__name__)
 _EMBEDDING_MODEL_CACHE: dict[str, Any] = {}
 
 T = TypeVar("T")
+
+# Records stored only to be fetched by ID still need a vector in Chroma.
+_PLACEHOLDER_DIM = 8
 
 # Embedded Chroma 1.5.9 sometimes can't read a freshly written collection: every query fails
 # with this error, retries don't clear it, yet the data on disk is fine and a newly opened
@@ -247,7 +251,20 @@ class VectorStore:
     # Indexing
     # ------------------------------------------------------------------
 
-    def add_chunks(self, chunks: list[Chunk]) -> int:
+    def add_unsearchable(self, chunks: list[Chunk]) -> int:
+        """Store records to fetch by ID, such as parent sections, without embedding them.
+
+        Nothing searches them, and embedding would add to indexing time, so each gets a small
+        placeholder vector. They differ per ID, because identical vectors degrade the index.
+        """
+        vectors = []
+        for chunk in chunks:
+            rng = np.random.default_rng(zlib.crc32(chunk.chunk_id.encode()))
+            vector = rng.standard_normal(_PLACEHOLDER_DIM)
+            vectors.append((vector / np.linalg.norm(vector)).tolist())
+        return self.add_chunks(chunks, embeddings=vectors)
+
+    def add_chunks(self, chunks: list[Chunk], embeddings: list[list[float]] | None = None) -> int:
         """Add chunks to the vector store. Returns count of added chunks.
 
         Inserts are split into batches bounded by the Chroma client's
@@ -276,10 +293,12 @@ class VectorStore:
             end = start + batch_size
 
             def _add_batch(collection: Any, _s: int = start, _e: int = end) -> None:
+                extra = {} if embeddings is None else {"embeddings": embeddings[_s:_e]}
                 collection.add(
                     ids=ids[_s:_e],
                     documents=documents[_s:_e],
                     metadatas=metadatas[_s:_e],
+                    **extra,
                 )
 
             self._collection_call(_add_batch)

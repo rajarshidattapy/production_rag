@@ -142,6 +142,10 @@ Measured on one CPU machine with PyTorch limited to one thread (the default), 2,
 
 The stub rows remove embedding cost to expose the pipeline's own overhead: smaller batches and the check for stored chunks add time that the CPU model's cost hides, and that faster hardware would make more noticeable. During the job, `/query` retrieval (with a stubbed LLM) stayed at p50 26 ms and p95 45 ms, against 20 ms and 33 ms idle, with a worst case of 372 ms. **Embedding is the bottleneck at about 4 chunks per second**, so a million chunks would take roughly 70 hours on this setup. That figure is extrapolated, not run.
 
+### Parent sections
+
+Ingestion splits each document into parent sections before chunking: a PDF page, a Markdown heading's section, or up to 4,000 characters of other text. Chunks never cross a parent. Each records its `parent_id`, and its heading path as `section` where there is one. Parent text is stored once in the `rag_parents` collection, without embeddings, for retrieval to hand larger context to the LLM. Retrieval doesn't use it yet.
+
 ### Accounts and chat history
 
 The browser UI requires an account. Chats are stored on the server in SQLite (`data/chat.db`, or `RAG_CHAT_DB_PATH`), so they follow the user across browsers and devices and survive restarts. Chats that older versions left in a browser's `localStorage` are moved into the account after the user confirms, the first time they sign in on that browser.
@@ -243,7 +247,7 @@ Citation support is a word-overlap heuristic, so it can catch a misattributed ci
 - **Context Budget** — `RAG_MAX_CONTEXT_CHARS` (default 12000) caps the context sent to the LLM as a cost guardrail. Passages past the budget are dropped, and the last one that fits is cut at the character limit, which can be mid-sentence.
 - **Security Hardening** — Path-traversal guards on `/ingest`, BM25 index stored as plain integer arrays loaded with `allow_pickle=False` (no pickle), 0o600 file permissions on data files, `re.escape()` on pricing pattern matching to prevent ReDoS.
 - **Docker Multi-Stage Build** — `deps → model-cache → runtime` stages; non-root user, with the default embedding and reranker models cached in the image. The image and compose stack have not been run end to end yet; see [known gaps](#known-gaps-to-close-before-production).
-- **Tests and CI** — 557 unit, integration, and stress tests (LLM calls mocked; no API keys needed). GitHub Actions workflows cover CI, the evaluation gate (skipped when the `OPENAI_API_KEY` secret is absent), and GHCR publish on every push to `master`.
+- **Tests and CI** — 574 unit, integration, and stress tests (LLM calls mocked; no API keys needed). GitHub Actions workflows cover CI, the evaluation gate (skipped when the `OPENAI_API_KEY` secret is absent), and GHCR publish on every push to `master`.
 
 ---
 

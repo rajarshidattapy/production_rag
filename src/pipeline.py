@@ -154,6 +154,7 @@ class RAGPipeline:
 
         # Phase 2: Reranker (lazy-loaded)
         self._reranker: CrossEncoderReranker | None = None
+        self._parent_store: VectorStore | None = None
 
         # Phase 4: Self-healing engine (lazy-loaded; only built when healing is used)
         self._healing_engine: HealingEngine | None = None
@@ -164,24 +165,38 @@ class RAGPipeline:
         """The Chroma-backed vector store (defaulting to English for backward compatibility)."""
         return self._get_vector_store("en")
 
+    def _open_store(self, collection_name: str) -> VectorStore:
+        return VectorStore(
+            collection_name=collection_name,
+            persist_path=self.config.chroma_path,
+            embedding_model=self.config.embedding_model,
+            embedding_dim=self.config.embedding_dim,
+            chroma_host=self.config.chroma_host,
+            chroma_port=self.config.chroma_port,
+            embedding_query_cache_size=self.config.embedding_query_cache_size,
+            hnsw_ef_search=self.config.hnsw_ef_search,
+            hnsw_max_neighbors=self.config.hnsw_max_neighbors,
+            hnsw_ef_construction=self.config.hnsw_ef_construction,
+            ingest_batch_size=self.config.ingest_batch_size,
+        )
+
+    def _get_parent_store(self) -> VectorStore:
+        """Parent sections, fetched by ID. One collection for every language."""
+        with self._lock:
+            if self._parent_store is None:
+                self._parent_store = self._open_store("rag_parents")
+            return self._parent_store
+
+    def get_parents(self, parent_ids: list[str]) -> list[dict[str, Any]]:
+        """Fetch parent sections by ID, in the order asked. Callers must check ``owner``."""
+        return self._get_parent_store().get_chunks(parent_ids)
+
     def _get_vector_store(self, lang: str) -> VectorStore:
         """Construct and retrieve the vector store for a specific language."""
         with self._lock:
             if lang not in self._vector_stores:
                 collection_name = f"rag_docs_{lang}"
-                self._vector_stores[lang] = VectorStore(
-                    collection_name=collection_name,
-                    persist_path=self.config.chroma_path,
-                    embedding_model=self.config.embedding_model,
-                    embedding_dim=self.config.embedding_dim,
-                    chroma_host=self.config.chroma_host,
-                    chroma_port=self.config.chroma_port,
-                    embedding_query_cache_size=self.config.embedding_query_cache_size,
-                    hnsw_ef_search=self.config.hnsw_ef_search,
-                    hnsw_max_neighbors=self.config.hnsw_max_neighbors,
-                    hnsw_ef_construction=self.config.hnsw_ef_construction,
-                    ingest_batch_size=self.config.ingest_batch_size,
-                )
+                self._vector_stores[lang] = self._open_store(collection_name)
             return self._vector_stores[lang]
 
     # ------------------------------------------------------------------
@@ -220,6 +235,7 @@ class RAGPipeline:
         stop = should_stop or (lambda: False)
         report = (lambda: on_progress(progress)) if on_progress else (lambda: None)
         pending: dict[str, list[Chunk]] = {}
+        pending_parents: list[Chunk] = []
         report()
 
         for path in files:
@@ -233,7 +249,7 @@ class RAGPipeline:
                 if owner:
                     # Two users can add the same file and must each get their own copy.
                     document.doc_id = f"{owner}/{document.doc_id}"
-                chunks = self.chunker.chunk(document)
+                parents, chunks = self.chunker.chunk_with_parents(document)
             except Exception as exc:
                 if path == root:
                     raise
@@ -242,9 +258,12 @@ class RAGPipeline:
             else:
                 if not chunks:
                     progress.add_failure(name, "No extractable text (it may be a scanned image).")
+                pending_parents.extend(parents)
                 for chunk in chunks:
                     pending.setdefault(_detect_language(chunk.content), []).append(chunk)
-                self._store_pending(pending, progress, report, _INGEST_STEP_CHUNKS, stop)
+                self._store_pending(
+                    pending, pending_parents, progress, report, _INGEST_STEP_CHUNKS, stop
+                )
                 if progress.stopped:
                     # Stopped partway through a long file: it will be finished by a re-run.
                     pending.clear()
@@ -254,19 +273,30 @@ class RAGPipeline:
             progress.files_done += 1
             report()
 
-        self._store_pending(pending, progress, report, 1)
+        self._store_pending(pending, pending_parents, progress, report, 1)
         logger.info("Ingested %d chunks from %s", progress.chunks_ingested, source)
         return progress.chunks_ingested
 
     def _store_pending(
         self,
         pending: dict[str, list[Chunk]],
+        parents: list[Chunk],
         progress: IngestProgress,
         report: Callable[[], None],
         at_least: int,
         should_stop: Callable[[], bool] | None = None,
     ) -> None:
-        """Store buffered chunks one step at a time while a language has ``at_least`` waiting."""
+        """Store buffered chunks one step at a time while a language has ``at_least`` waiting.
+
+        Parents are stored first, so a stored chunk's parent can always be fetched.
+        """
+        if parents and any(len(chunks) >= at_least for chunks in pending.values()):
+            store = self._get_parent_store()
+            known = store.existing_ids([p.chunk_id for p in parents])
+            fresh = [p for p in parents if p.chunk_id not in known]
+            if fresh:
+                store.add_unsearchable(fresh)
+            parents.clear()
         for lang, chunks in pending.items():
             while len(chunks) >= at_least:
                 step = chunks[:_INGEST_STEP_CHUNKS]
@@ -790,8 +820,11 @@ class RAGPipeline:
             if lang != "en":
                 vs.delete_collection()
 
+        self._get_parent_store().delete_collection()
+
         self._vector_stores.clear()
         self._hybrid_retrievers.clear()
+        self._parent_store = None
         self._reranker = None
         logger.info("Pipeline reset: vector store cleared")
 

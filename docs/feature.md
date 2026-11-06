@@ -4,7 +4,6 @@
 
 *Mostly `src/ingestion/`, plus ingestion in `src/pipeline.py` and `src/api.py`. Changing what gets extracted or stored means re-ingesting, so do this stage first.*
 
-- **Parent-Child Retrieval** needs each chunk to record its parent section.
 - **Temporal Retrieval** and **Source Conflict Resolution** need document versions, timestamps, and source authority.
 - **Fine-Grained Authorization** needs roles or collections on each chunk, beyond today's `owner`.
 - **Prompt Injection Defense** and **PII Detection** are cheapest here, before text reaches the index.
@@ -13,7 +12,7 @@
 
 - **OCR Fallback:** Automatically extract text from scanned PDFs and image-based documents when ordinary PDF text extraction fails.
 - **Ingestion Quality Validation:** Detect corrupted files, empty extraction, malformed pages, unsupported formats, and extraction failures before indexing.
-- **Document Structure Awareness:** Preserve headings, sections, paragraphs, and hierarchical relationships during parsing and chunking.
+- **Document Structure Awareness:** Preserve headings, sections, paragraphs, and hierarchical relationships during parsing and chunking. Markdown headings are now recorded as each chunk's `section`; PDF and plain-text structure isn't.
 - **Table-Aware Extraction:** Preserve table headers, rows, columns, and cell relationships instead of flattening tables into ambiguous text.
 - **Prompt Injection Defense:** Detect and neutralize malicious instructions embedded in uploaded documents before they influence LLM behaviour.
 - **PII Detection and Redaction:** Identify and redact sensitive information such as emails, phone numbers, credentials, and personal identifiers before indexing or generation.
@@ -67,7 +66,7 @@
 
 **Choosing and shaping context**
 
-- **Parent-Child Retrieval:** Retrieve precise child chunks for relevance while supplying their larger parent sections for sufficient context.
+- **Parent-Child Retrieval:** Retrieve precise child chunks for relevance while supplying their larger parent sections for sufficient context. Ingestion already records each chunk's `parent_id` and stores the parent's text (`RAGPipeline.get_parents`), so this is retrieval-only work.
 - **Temporal Retrieval:** Prefer current document versions and distinguish historical information from the latest available facts.
 - **Context Compression:** Remove redundant passages and compress retrieved evidence while preserving information needed to answer accurately.
 - **Fine-Grained Authorization:** Enforce document-, collection-, and role-level permissions during retrieval, not merely at the API endpoint.
