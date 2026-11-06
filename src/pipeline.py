@@ -7,10 +7,10 @@ import gettext
 import logging
 import re
 import time
-from collections.abc import AsyncGenerator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 if TYPE_CHECKING:
     from src.healing.state_machine import HealingEngine, HealingObserver
@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 
 _SUPPORTED_LANGUAGES: frozenset[str] = frozenset(["en", "de", "es"])
 
+T = TypeVar("T")
+
 # Owner of documents added without an account. Everyone can read them.
 SHARED_OWNER = "shared"
 # Whose documents retrieval may read during this request. The API always sets it. ``None``
@@ -44,18 +46,28 @@ retrieval_owners: contextvars.ContextVar[tuple[str, ...] | None] = contextvars.C
 _UPLOAD_PREFIX_RE = re.compile(r"^[0-9a-f]{32}_")
 
 
-def _source_authority(path: Path, data_dir: Path, rules: dict[str, int], default: int) -> int:
-    """Authority of the longest configured folder ``path`` is in, or the default."""
+DEFAULT_COLLECTION = "default"
+
+
+def _folder_rule(path: Path, data_dir: Path, rules: Mapping[str, T]) -> T | None:
+    """The value for the longest configured folder ``path`` is in, if any."""
     try:
         parts = path.resolve().relative_to(data_dir.resolve()).parts
     except ValueError:
-        return default
-    best, best_depth = default, -1
-    for folder, authority in rules.items():
+        return None
+    best: T | None = None
+    best_depth = -1
+    for folder, value in rules.items():
         key = tuple(p for p in Path(folder).parts if p not in ("", "."))
         if parts[: len(key)] == key and len(key) > best_depth:
-            best, best_depth = authority, len(key)
+            best, best_depth = value, len(key)
     return best
+
+
+def _source_authority(path: Path, data_dir: Path, rules: dict[str, int], default: int) -> int:
+    """Authority of the longest configured folder ``path`` is in, or the default."""
+    found = _folder_rule(path, data_dir, rules)
+    return default if found is None else found
 
 
 def _document_key(path: Path, data_dir: Path, owner: str) -> str:
@@ -313,7 +325,7 @@ class RAGPipeline:
     def _record_provenance(
         self, document: Document, path: Path, owner: str | None, ingested_at: float
     ) -> None:
-        """Owner, version, timestamps, and authority, copied onto every chunk and parent.
+        """Owner, version, timestamps, authority, and access, copied onto every chunk and parent.
 
         The version is part of each chunk's ID, so an edited file is stored as a new version
         beside the old one instead of being mistaken for chunks that are already stored.
@@ -328,6 +340,18 @@ class RAGPipeline:
             self.config.source_authority,
             self.config.default_source_authority,
         )
+        # Who may read it beyond its owner. `restricted` is explicit, because a filter can't
+        # match a list that isn't there.
+        meta["collection"] = (
+            _folder_rule(path, self.config.data_dir, self.config.source_collections)
+            or DEFAULT_COLLECTION
+        )
+        roles = sorted(
+            set(_folder_rule(path, self.config.data_dir, self.config.source_roles) or [])
+        )
+        meta["restricted"] = bool(roles)
+        if roles:
+            meta["roles"] = roles
         version = str(meta.get("content_hash", ""))[:16]
         meta["version_id"] = version
         # Two users can add the same file and must each get their own copy.

@@ -156,9 +156,11 @@ Every chunk and parent records where it came from, for retrieval to prefer curre
 | `version_id` | The start of the file's SHA-256 (`content_hash` holds all of it). A changed file is stored as a new version beside the old one |
 | `document_date` | The PDF's own modified or created date if it has one, otherwise the file's modified time. `document_date_source` says which, because an upload's file time is the upload time |
 | `ingested_at` | When it was indexed |
+| `collection` | Logical collection from `RAG_SOURCE_COLLECTIONS`, e.g. `{"policies/hr": "hr-policies"}`, else `default` |
+| `restricted`, `roles` | Roles allowed to read it, from `RAG_SOURCE_ROLES`, e.g. `{"policies/hr": ["hr"]}`. `restricted` is `false` with no `roles` when none apply. `roles` is stored as a list, so a filter can match one role with `{"roles": {"$contains": "hr"}}` |
 | `authority` | 0 to 100, from `RAG_SOURCE_AUTHORITY`, e.g. `{"policies": 90, "uploads": 30}` (folders inside `RAG_DATA_DIR`, longest match wins), else `RAG_DEFAULT_SOURCE_AUTHORITY` (50) |
 
-Retrieval doesn't use these yet. Two uploads with the same filename count as versions of one document, even if they are unrelated.
+Retrieval doesn't use these yet, and users don't have roles yet. Names are lowercase letters, digits, `.`, `_`, and `-`. Two uploads with the same filename count as versions of one document, even if they are unrelated.
 
 ### Accounts and chat history
 
@@ -261,7 +263,7 @@ Citation support is a word-overlap heuristic, so it can catch a misattributed ci
 - **Context Budget** — `RAG_MAX_CONTEXT_CHARS` (default 12000) caps the context sent to the LLM as a cost guardrail. Passages past the budget are dropped, and the last one that fits is cut at the character limit, which can be mid-sentence.
 - **Security Hardening** — Path-traversal guards on `/ingest`, BM25 index stored as plain integer arrays loaded with `allow_pickle=False` (no pickle), 0o600 file permissions on data files, `re.escape()` on pricing pattern matching to prevent ReDoS.
 - **Docker Multi-Stage Build** — `deps → model-cache → runtime` stages; non-root user, with the default embedding and reranker models cached in the image. The image and compose stack have not been run end to end yet; see [known gaps](#known-gaps-to-close-before-production).
-- **Tests and CI** — 594 unit, integration, and stress tests (LLM calls mocked; no API keys needed). GitHub Actions workflows cover CI, the evaluation gate (skipped when the `OPENAI_API_KEY` secret is absent), and GHCR publish on every push to `master`.
+- **Tests and CI** — 608 unit, integration, and stress tests (LLM calls mocked; no API keys needed). GitHub Actions workflows cover CI, the evaluation gate (skipped when the `OPENAI_API_KEY` secret is absent), and GHCR publish on every push to `master`.
 
 ---
 
@@ -483,6 +485,8 @@ All settings use the `RAG_` prefix and can be set via `.env` or environment vari
 | `RAG_ALLOW_STORE_RESET`          | `false`                                | Let `reset` on `/ingest` delete every user's documents      |
 | `RAG_SOURCE_AUTHORITY`           | `{}`                                   | JSON of folder to authority 0-100, e.g. `{"policies": 90}`   |
 | `RAG_DEFAULT_SOURCE_AUTHORITY`   | `50`                                   | Authority for documents in no configured folder             |
+| `RAG_SOURCE_COLLECTIONS`         | `{}`                                   | JSON of folder to collection name                           |
+| `RAG_SOURCE_ROLES`               | `{}`                                   | JSON of folder to the roles allowed to read it              |
 | `RAG_AUTH_IP_MAX_ATTEMPTS`       | `20`                                   | Failed sign-ins and registrations per address per window    |
 | `RAG_AUTH_IP_WINDOW_SECONDS`     | `300`                                  | Length of that window                                       |
 | `RAG_SESSION_TTL_HOURS`          | `720`                                  | How long a login lasts                                      |

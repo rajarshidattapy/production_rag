@@ -8,7 +8,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from src.ingestion.loader import Document
+from src.ingestion.loader import Document, MetadataValue
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ class Chunk:
     """A single chunk derived from a document."""
 
     content: str
-    metadata: dict[str, str | int | float] = field(default_factory=dict)
+    metadata: dict[str, MetadataValue] = field(default_factory=dict)
     chunk_id: str = ""
     doc_id: str = ""
 
@@ -148,7 +148,7 @@ class Chunker:
             for piece in _cap_section(section):
                 if not piece.strip():
                     continue
-                metadata: dict[str, str | int | float] = {
+                metadata: dict[str, MetadataValue] = {
                     **document.metadata,
                     "parent_index": len(parents),
                 }

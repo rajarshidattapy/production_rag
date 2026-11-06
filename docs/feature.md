@@ -4,7 +4,6 @@
 
 *Mostly `src/ingestion/`, plus ingestion in `src/pipeline.py` and `src/api.py`. Changing what gets extracted or stored means re-ingesting, so do this stage first.*
 
-- **Temporal Retrieval** and **Source Conflict Resolution** need document versions, timestamps, and source authority.
 - **Fine-Grained Authorization** needs roles or collections on each chunk, beyond today's `owner`.
 - **Prompt Injection Defense** and **PII Detection** are cheapest here, before text reaches the index.
 
@@ -68,7 +67,7 @@
 - **Parent-Child Retrieval:** Retrieve precise child chunks for relevance while supplying their larger parent sections for sufficient context. Ingestion already records each chunk's `parent_id` and stores the parent's text (`RAGPipeline.get_parents`), so this is retrieval-only work.
 - **Temporal Retrieval:** Prefer current document versions and distinguish historical information from the latest available facts. The metadata it needs is already recorded on every chunk: `document_key`, `version_id`, `document_date`, and `ingested_at`.
 - **Context Compression:** Remove redundant passages and compress retrieved evidence while preserving information needed to answer accurately.
-- **Fine-Grained Authorization:** Enforce document-, collection-, and role-level permissions during retrieval, not merely at the API endpoint.
+- **Fine-Grained Authorization:** Enforce document-, collection-, and role-level permissions during retrieval, not merely at the API endpoint. Chunks and parents now carry `collection`, `restricted`, and `roles`, set per folder with `RAG_SOURCE_COLLECTIONS` and `RAG_SOURCE_ROLES`; users don't have roles yet, and retrieval doesn't filter on them.
 
 **Measuring quality**
 
@@ -152,7 +151,7 @@
 - **Software Bill of Materials (SBOM):** Generate a machine-readable inventory of dependencies to improve supply-chain transparency.
 - **Container Image Signing:** Sign release images and verify their authenticity before deployment.
 
-&nbsp;
+
 
 ## Final boss: Deploy
 
@@ -192,15 +191,15 @@ Vultr's automatic backups add 20%, about $4 to$5. A domain is roughly $1 a month
 1. **Install CPU-only PyTorch in the Dockerfile.** The image currently pulls the full GPU build, which adds several GB and does nothing on a CPU VM.
 2. **Add Caddy for HTTPS** and stop publishing port 8000, which sends passwords and session cookies unencrypted. In `docker-compose.yml`, remove `ports` from `api`, then add this service and a `caddy_data` entry under `volumes`:
    ```yaml
-       caddy:
-         image: caddy:2
-         restart: unless-stopped
-         ports: ["80:80", "443:443"]
-         command: caddy reverse-proxy --from rag.example.com --to api:8000
-         volumes: [caddy_data:/data]
+        caddy:
+          image: caddy:2
+          restart: unless-stopped
+          ports: ["80:80", "443:443"]
+          command: caddy reverse-proxy --from rag.example.com --to api:8000
+          volumes: [caddy_data:/data]
    ```
 
-     Also set `FORWARDED_ALLOW_IPS=*` in `.env`, but only once port 8000 isn't published. Without it, every user shares Caddy's address and one login limit.
+      Also set `FORWARDED_ALLOW_IPS=*` in `.env`, but only once port 8000 isn't published. Without it, every user shares Caddy's address and one login limit.
 3. **Pull the image instead of building on the VM.** Replace `build:` with the image the publish workflow pushes to GHCR. Building on a 4 GB VM is slow, because it downloads PyTorch and the models.
 4. **Give shutdown time to finish** with `stop_grace_period: 90s` on `api`. The Docker default of 10 s can cut off an indexing batch. That's recoverable with Run again, but it's avoidable.
 5. **Restore a backup once**, so you know it works before you need it.

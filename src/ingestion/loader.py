@@ -12,13 +12,17 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# What a chunk's metadata can hold. Lists of strings are stored as lists, so filters can match
+# one element (e.g. a role); anything else is stored as text.
+MetadataValue = str | int | float | list[str]
+
 
 @dataclass
 class Document:
     """A single loaded document with content and metadata."""
 
     content: str
-    metadata: dict[str, str | int | float] = field(default_factory=dict)
+    metadata: dict[str, MetadataValue] = field(default_factory=dict)
     doc_id: str = ""
     # Text of each physical page, in order, for paginated formats. Empty otherwise.
     pages: list[str] = field(default_factory=list)

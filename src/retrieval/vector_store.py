@@ -45,6 +45,15 @@ _client_generations: dict[str, int] = {}
 _last_reopen: dict[str, float] = {}
 
 
+def _chroma_value(value: Any) -> Any:
+    """Keep types that metadata filters compare: numbers (page >= 3) and string lists (roles)."""
+    if isinstance(value, int | float):
+        return value
+    if isinstance(value, list) and value and all(isinstance(v, str) for v in value):
+        return value
+    return str(value)
+
+
 class VectorStoreUnavailableError(RuntimeError):
     """The vector database cannot be reached: a server-side outage, not bad input."""
 
@@ -281,10 +290,7 @@ class VectorStore:
         for chunk in chunks:
             ids.append(chunk.chunk_id or str(uuid.uuid4()))
             documents.append(chunk.content)
-            # Numbers stay numeric so metadata filters can compare them (page >= 3).
-            metadatas.append(
-                {k: v if isinstance(v, int | float) else str(v) for k, v in chunk.metadata.items()}
-            )
+            metadatas.append({k: _chroma_value(v) for k, v in chunk.metadata.items()})
 
         batch_size = self._max_batch_size()
 

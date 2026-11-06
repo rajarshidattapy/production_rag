@@ -5,8 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, StringConstraints
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Collection and role names: lowercase, so "HR" and "hr" can't become two different roles.
+AccessName = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9_.-]{0,63}$")]
 
 
 class Settings(BaseSettings):
@@ -119,6 +122,11 @@ class Settings(BaseSettings):
     # The longest matching folder wins; anything else gets the default.
     source_authority: dict[str, Annotated[int, Field(ge=0, le=100)]] = {}
     default_source_authority: int = Field(default=50, ge=0, le=100)
+    # Which logical collection a folder's documents belong to, and which roles may read them,
+    # also as JSON by folder, e.g. {"policies/hr": "hr-policies"} and {"policies/hr": ["hr"]}.
+    # Documents in no folder with roles are readable as today, subject to their owner.
+    source_collections: dict[str, AccessName] = {}
+    source_roles: dict[str, list[AccessName]] = {}
 
     # ---------- Accounts and chat history ----------
     # SQLite file holding accounts and chats. Defaults to <data_dir>/chat.db.
