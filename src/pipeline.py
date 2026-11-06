@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import contextvars
 import gettext
+import hashlib
 import logging
 import re
 import time
+from collections import Counter
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,6 +23,7 @@ if TYPE_CHECKING:
 from src.config import settings
 from src.generation.citations import Citation, CitationFormatter
 from src.generation.generator import Generator
+from src.ingestion import screening
 from src.ingestion.chunker import Chunk, Chunker
 from src.ingestion.loader import Document, DocumentLoader
 from src.retrieval.vector_store import VectorStore
@@ -283,6 +286,7 @@ class RAGPipeline:
         report = (lambda: on_progress(progress)) if on_progress else (lambda: None)
         pending: dict[str, list[Chunk]] = {}
         pending_parents: list[Chunk] = []
+        screened: list[tuple[str, str, str]] = []
         ingested_at = time.time()
         report()
 
@@ -294,7 +298,16 @@ class RAGPipeline:
             try:
                 document = self.loader._load_file(path)
                 self._record_provenance(document, path, owner, ingested_at)
+                self._screen(document, name)
+                screened.append(
+                    (
+                        str(document.metadata["document_key"]),
+                        str(document.metadata["version_id"]),
+                        str(document.metadata["screening"]),
+                    )
+                )
                 parents, chunks = self.chunker.chunk_with_parents(document)
+                parents, chunks, excluded = self._flag_and_exclude(parents, chunks, name)
             except Exception as exc:
                 if path == root:
                     raise
@@ -302,7 +315,12 @@ class RAGPipeline:
                 progress.add_failure(name, str(exc))
             else:
                 if not chunks:
-                    progress.add_failure(name, "No extractable text (it may be a scanned image).")
+                    progress.add_failure(
+                        name,
+                        "All of its text looked like instructions to the model, so none was indexed."
+                        if excluded
+                        else "No extractable text (it may be a scanned image).",
+                    )
                 pending_parents.extend(parents)
                 for chunk in chunks:
                     pending.setdefault(_detect_language(chunk.content), []).append(chunk)
@@ -319,6 +337,7 @@ class RAGPipeline:
             report()
 
         self._store_pending(pending, pending_parents, progress, report, 1)
+        self._remove_other_screenings(screened)
         logger.info("Ingested %d chunks from %s", progress.chunks_ingested, source)
         return progress.chunks_ingested
 
@@ -357,6 +376,120 @@ class RAGPipeline:
         # Two users can add the same file and must each get their own copy.
         prefix = f"{owner}/" if owner else ""
         document.doc_id = f"{prefix}{document.doc_id}@{version}"
+
+    def _screen(self, document: Document, name: str) -> None:
+        """Strip hidden text and chat markup, and redact what the settings say to, in place."""
+        cfg = self.config
+
+        def clean(text: str) -> tuple[str, Counter[str]]:
+            return screening.redact(
+                screening.neutralize(text),
+                credentials=cfg.redact_credentials,
+                pii=cfg.pii_mode == "redact",
+            )
+
+        found: Counter[str] = Counter()
+        if document.pages:
+            cleaned = [clean(page) for page in document.pages]
+            document.pages = [text for text, _ in cleaned]
+            document.content = "\n\n".join(document.pages)
+            for _, counts in cleaned:
+                found.update(counts)
+        else:
+            document.content, found = clean(document.content)
+        trusted = cfg.injection_trusted_authority
+        document.metadata["screening"] = (
+            f"rules={screening.RULES_VERSION};"
+            f"credentials={'redact' if cfg.redact_credentials else 'keep'};"
+            f"pii={cfg.pii_mode};injection={cfg.injection_mode};"
+            f"trusted={'none' if trusted is None else trusted}"
+        )
+        # Part of every chunk ID, so changed settings produce new chunks when a file is
+        # ingested again; the copies screened the old way are removed once those are stored.
+        fingerprint = hashlib.md5(str(document.metadata["screening"]).encode()).hexdigest()[:8]
+        document.doc_id = f"{document.doc_id}~{fingerprint}"
+        if found:
+            document.metadata["redacted"] = sorted(found)
+            logger.info("Redacted from %s: %s", name, dict(found))
+
+    def _remove_other_screenings(self, screened: list[tuple[str, str, str]]) -> int:
+        """Delete these files' chunks and parents that were screened with other settings.
+
+        Runs after the new copies are stored, so a file is never left with nothing. Chunks
+        from before screening was recorded have no ``screening`` and are left alone.
+        """
+        stores: list[tuple[str | None, VectorStore]] = [
+            (lang, self._get_vector_store(lang)) for lang in sorted(_SUPPORTED_LANGUAGES)
+        ]
+        stores.append((None, self._get_parent_store()))
+        removed = 0
+        for start in range(0, len(screened), 100):
+            clauses: list[dict[str, Any]] = [
+                {
+                    "$and": [
+                        {"document_key": key},
+                        {"version_id": version},
+                        {"screening": {"$ne": settings_used}},
+                    ]
+                }
+                for key, version, settings_used in screened[start : start + 100]
+            ]
+            where = clauses[0] if len(clauses) == 1 else {"$or": clauses}
+            for lang, store in stores:
+                ids = sorted(store.ids_matching(where))
+                for batch in range(0, len(ids), 500):
+                    store.delete_chunks(ids[batch : batch + 500])
+                if ids:
+                    removed += len(ids)
+                    if lang is not None and lang in self._hybrid_retrievers:
+                        self._hybrid_retrievers[lang].invalidate_index()
+        if removed:
+            logger.info("Removed %d chunks and parents screened with other settings", removed)
+        return removed
+
+    def _flag_and_exclude(
+        self, parents: list[Chunk], chunks: list[Chunk], name: str
+    ) -> tuple[list[Chunk], list[Chunk], int]:
+        """Record injection signals and personal data per chunk and parent; maybe exclude.
+
+        Exclusion works on whole parent sections, because a phrase can span two chunks and
+        the parent is what parent-child retrieval would hand to the model.
+        """
+        flag_pii = self.config.pii_mode == "flag"
+        trusted = self.config.injection_trusted_authority
+        for record in (*parents, *chunks):
+            signals = screening.injection_signals(record.content)
+            authority = record.metadata.get("authority")
+            exempt = (
+                bool(signals)
+                and trusted is not None
+                and isinstance(authority, int)
+                and authority >= trusted
+            )
+            record.metadata["injection_suspected"] = bool(signals) and not exempt
+            if exempt:
+                record.metadata["injection_exempt"] = True
+            if signals:
+                record.metadata["injection_signals"] = signals
+            if flag_pii:
+                kinds = screening.pii_types(record.content)
+                record.metadata["pii_found"] = bool(kinds)
+                if kinds:
+                    record.metadata["pii_types"] = kinds
+        if self.config.injection_mode != "exclude":
+            return parents, chunks, 0
+        blocked = {p.chunk_id for p in parents if p.metadata["injection_suspected"]}
+        kept = [c for c in chunks if c.metadata["parent_id"] not in blocked]
+        excluded = len(chunks) - len(kept)
+        if excluded:
+            logger.warning(
+                "Left %d of %d chunks of %s out of the index: they looked like instructions "
+                "to the model",
+                excluded,
+                len(chunks),
+                name,
+            )
+        return [p for p in parents if p.chunk_id not in blocked], kept, excluded
 
     def _store_pending(
         self,

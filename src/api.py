@@ -43,6 +43,7 @@ from src.chat.store import AccountLockedError, ChatStore, User, UsernameTakenErr
 from src.config import settings as _settings
 from src.generation.citations import CitationFormatter
 from src.healing.metrics import HEALING_REGISTRY
+from src.ingestion import screening
 from src.pipeline import SHARED_OWNER, IngestProgress, RAGPipeline, retrieval_owners
 from src.retrieval.vector_store import VectorStoreUnavailableError
 from src.utils.i18n import _
@@ -510,6 +511,20 @@ def metrics() -> Response:
         content=generate_latest(_metrics_registry) + generate_latest(HEALING_REGISTRY),
         media_type=CONTENT_TYPE_LATEST,
     )
+
+
+def _outgoing(text: str) -> str:
+    """Text as it may leave the service: redacted when RAG_REDACT_ANSWERS is on."""
+    if not _settings.redact_answers:
+        return text
+    return screening.redact(text, credentials=True, pii=True)[0]
+
+
+def _citation_dicts(citations: list[Any]) -> list[dict[str, Any]]:
+    return [
+        {**c, "text_snippet": _outgoing(c["text_snippet"])}
+        for c in CitationFormatter.to_dict(citations)
+    ]
 
 
 def _refuse_reset_unless_allowed(reset: bool) -> None:
@@ -1006,8 +1021,9 @@ async def query(
                 score=c["score"],
                 page=c.get("page"),
             )
-            for c in CitationFormatter.to_dict(citations)
+            for c in _citation_dicts(citations)
         ]
+        answer = _outgoing(answer)
 
         # Populate response headers with token usage metrics
         response.headers["X-RAG-Prompt-Tokens"] = str(tracker.prompt_tokens)
@@ -1029,7 +1045,7 @@ def get_chunk(chunk_id: str, rag_session: str | None = Cookie(None)) -> ChunkRes
         raise HTTPException(
             status_code=404, detail="This passage is no longer in the document store."
         )
-    return ChunkResponse(chunk_id=chunk_id, text=chunk["document"])
+    return ChunkResponse(chunk_id=chunk_id, text=_outgoing(chunk["document"]))
 
 
 # ---------------------------------------------------------------------------
@@ -1417,11 +1433,28 @@ async def query_stream(
                     ),
                     timeout,
                 )
-                for piece in _SSE_CHUNK_RE.findall(result.answer):
+                for piece in _SSE_CHUNK_RE.findall(_outgoing(result.answer)):
                     yield f"data: {json.dumps({'token': piece})}\n\n"
                 yield f"data: {json.dumps({'healing': _healing_payload(result.info)})}\n\n"
-                citation_dicts = CitationFormatter.to_dict(result.citations)
+                citation_dicts = _citation_dicts(result.citations)
                 yield f"data: {json.dumps({'citations': citation_dicts})}\n\n"
+                return
+
+            if _settings.redact_answers:
+                # Redaction needs the whole answer: a pattern can span two streamed tokens.
+                answer, citations = await asyncio.wait_for(
+                    pipeline.query_async(
+                        question,
+                        top_k=request.top_k,
+                        use_hybrid=request.use_hybrid,
+                        use_reranker=request.use_reranker,
+                        self_heal=False,
+                    ),
+                    timeout,
+                )
+                for piece in _SSE_CHUNK_RE.findall(_outgoing(answer)):
+                    yield f"data: {json.dumps({'token': piece})}\n\n"
+                yield f"data: {json.dumps({'citations': _citation_dicts(citations)})}\n\n"
                 return
 
             events = pipeline.stream_answer(
@@ -1440,7 +1473,7 @@ async def query_stream(
                     yield f"data: {json.dumps({'token': value})}\n\n"
                 elif kind == "citations":
                     # Emit citations as final structured event
-                    citation_dicts = CitationFormatter.to_dict(value)
+                    citation_dicts = _citation_dicts(value)
                     yield f"data: {json.dumps({'citations': citation_dicts})}\n\n"
 
         except ValueError as exc:

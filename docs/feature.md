@@ -1,20 +1,12 @@
 ## Not implemented yet, but identified as next production upgrades:
 
-### Stage 1: Ingestion
-
-*Mostly `src/ingestion/`, plus ingestion in `src/pipeline.py` and `src/api.py`. Changing what gets extracted or stored means re-ingesting, so do this stage first.*
-
-- **Fine-Grained Authorization** needs roles or collections on each chunk, beyond today's `owner`.
-- **Prompt Injection Defense** and **PII Detection** are cheapest here, before text reaches the index.
-
 **Reading documents**
 
+- **Injection detection only knows its patterns.** Paraphrased or novel instructions aren't caught, and the prompt's caution is the only defence then. A trained classifier (e.g. a fine-tuned prompt-injection model) would catch more, at extra CPU time per chunk. *From the code.*
 - **OCR Fallback:** Automatically extract text from scanned PDFs and image-based documents when ordinary PDF text extraction fails.
 - **Ingestion Quality Validation:** Detect corrupted files, empty extraction, malformed pages, unsupported formats, and extraction failures before indexing.
 - **Document Structure Awareness:** Preserve headings, sections, paragraphs, and hierarchical relationships during parsing and chunking. Markdown headings are now recorded as each chunk's `section`; PDF and plain-text structure isn't.
 - **Table-Aware Extraction:** Preserve table headers, rows, columns, and cell relationships instead of flattening tables into ambiguous text.
-- **Prompt Injection Defense:** Detect and neutralize malicious instructions embedded in uploaded documents before they influence LLM behaviour.
-- **PII Detection and Redaction:** Identify and redact sensitive information such as emails, phone numbers, credentials, and personal identifiers before indexing or generation.
 
 **Chunks and metadata**
 

@@ -162,6 +162,23 @@ Every chunk and parent records where it came from, for retrieval to prefer curre
 
 Retrieval doesn't use these yet, and users don't have roles yet. Names are lowercase letters, digits, `.`, `_`, and `-`. Two uploads with the same filename count as versions of one document, even if they are unrelated.
 
+### Screening before indexing
+
+Every document is screened before it is chunked:
+
+- **Always:** hidden Unicode tag characters (which can spell out invisible instructions) become `[removed hidden text]`, chat-format control tokens such as `<|im_start|>` and `[INST]` become `[removed chat markup]`, and bidirectional overrides and zero-width spaces are removed.
+- **Credentials** (`RAG_REDACT_CREDENTIALS`, on by default): API keys, private keys, cloud and chat tokens, JWTs, passwords in URLs, and `password=` style values become `[REDACTED <TYPE>]`.
+- **Personal data** (`RAG_PII_MODE`): emails, phone numbers, card numbers (Luhn-checked), IBANs (checksum-checked), US SSNs, and IP addresses. `flag` (the default) keeps the text and records `pii_types` on each chunk, `redact` replaces it, `off` does neither.
+- **Instruction-like text** (`RAG_INJECTION_MODE`): phrases such as "ignore previous instructions" in English, German, and Spanish. `flag` (the default) records `injection_signals` on each chunk; `exclude` keeps the whole parent section and its chunks out of the index, and names a file in the job's failures if nothing of it was left.
+
+Each chunk records the settings it was screened with in `screening`. After changing a setting, ingest the files again: their chunks are re-screened, and the copies screened the old way are removed once the new ones are stored. Chunks indexed before `screening` was recorded aren't replaced; clear the store for those.
+
+- **Trusted sources** (`RAG_INJECTION_TRUSTED_AUTHORITY`): documents from sources at or above this authority keep their `injection_signals` but are never marked suspect or excluded, so a security team's own writing about prompt injection isn't treated as an attack.
+- **At answer time:** the context tells the model that sources are quoted data, never instructions, and each passage flagged as instruction-like carries a caution naming its signals.
+- **Outgoing text** (`RAG_REDACT_ANSWERS`, off by default): redacts credentials and personal data from answers, citations, and `/chunks`, whatever was stored. `/query/stream` then sends the answer once it is complete, because a pattern can span two tokens.
+
+The patterns are signals, not verdicts: they miss instructions they don't describe.
+
 ### Accounts and chat history
 
 The browser UI requires an account. Chats are stored on the server in SQLite (`data/chat.db`, or `RAG_CHAT_DB_PATH`), so they follow the user across browsers and devices and survive restarts. Chats that older versions left in a browser's `localStorage` are moved into the account after the user confirms, the first time they sign in on that browser.
@@ -263,7 +280,7 @@ Citation support is a word-overlap heuristic, so it can catch a misattributed ci
 - **Context Budget** — `RAG_MAX_CONTEXT_CHARS` (default 12000) caps the context sent to the LLM as a cost guardrail. Passages past the budget are dropped, and the last one that fits is cut at the character limit, which can be mid-sentence.
 - **Security Hardening** — Path-traversal guards on `/ingest`, BM25 index stored as plain integer arrays loaded with `allow_pickle=False` (no pickle), 0o600 file permissions on data files, `re.escape()` on pricing pattern matching to prevent ReDoS.
 - **Docker Multi-Stage Build** — `deps → model-cache → runtime` stages; non-root user, with the default embedding and reranker models cached in the image. The image and compose stack have not been run end to end yet; see [known gaps](#known-gaps-to-close-before-production).
-- **Tests and CI** — 608 unit, integration, and stress tests (LLM calls mocked; no API keys needed). GitHub Actions workflows cover CI, the evaluation gate (skipped when the `OPENAI_API_KEY` secret is absent), and GHCR publish on every push to `master`.
+- **Tests and CI** — 685 unit, integration, and stress tests (LLM calls mocked; no API keys needed). GitHub Actions workflows cover CI, the evaluation gate (skipped when the `OPENAI_API_KEY` secret is absent), and GHCR publish on every push to `master`.
 
 ---
 
@@ -486,6 +503,11 @@ All settings use the `RAG_` prefix and can be set via `.env` or environment vari
 | `RAG_SOURCE_AUTHORITY`           | `{}`                                   | JSON of folder to authority 0-100, e.g. `{"policies": 90}`   |
 | `RAG_DEFAULT_SOURCE_AUTHORITY`   | `50`                                   | Authority for documents in no configured folder             |
 | `RAG_SOURCE_COLLECTIONS`         | `{}`                                   | JSON of folder to collection name                           |
+| `RAG_REDACT_CREDENTIALS`         | `true`                                 | Replace API keys, private keys, tokens, and passwords       |
+| `RAG_PII_MODE`                   | `flag`                                 | Personal data: `flag`, `redact`, or `off`                   |
+| `RAG_INJECTION_MODE`             | `flag`                                 | Instruction-like text: `flag`, or `exclude` from the index  |
+| `RAG_INJECTION_TRUSTED_AUTHORITY` | *(unset)*                             | Sources at or above this authority are never marked suspect |
+| `RAG_REDACT_ANSWERS`             | `false`                                | Redact credentials and personal data from what is returned  |
 | `RAG_SOURCE_ROLES`               | `{}`                                   | JSON of folder to the roles allowed to read it              |
 | `RAG_AUTH_IP_MAX_ATTEMPTS`       | `20`                                   | Failed sign-ins and registrations per address per window    |
 | `RAG_AUTH_IP_WINDOW_SECONDS`     | `300`                                  | Length of that window                                       |

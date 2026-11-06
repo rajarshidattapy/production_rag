@@ -128,6 +128,22 @@ class Settings(BaseSettings):
     source_collections: dict[str, AccessName] = {}
     source_roles: dict[str, list[AccessName]] = {}
 
+    # ---------- Screening text before indexing ----------
+    # Credentials (API keys, private keys, tokens, passwords) are replaced before indexing.
+    redact_credentials: bool = True
+    # Personal data (emails, phones, card numbers, IBANs, SSNs, IP addresses): "flag" records
+    # what each chunk contains and keeps the text, "redact" replaces it, "off" does neither.
+    pii_mode: Literal["off", "flag", "redact"] = "flag"
+    # Instruction-like text ("ignore previous instructions"): "flag" records it on the chunk,
+    # "exclude" keeps the whole parent section, and its chunks, out of the index.
+    injection_mode: Literal["flag", "exclude"] = "flag"
+    # Sources at or above this authority are recorded but never treated as suspect, so a
+    # security team's own documents about prompt injection aren't flagged or excluded.
+    injection_trusted_authority: int | None = Field(default=None, ge=0, le=100)
+    # Redact credentials and personal data from answers, citations, and full passages before
+    # they are returned, whatever was stored. Streaming then sends the answer once it's whole.
+    redact_answers: bool = False
+
     # ---------- Accounts and chat history ----------
     # SQLite file holding accounts and chats. Defaults to <data_dir>/chat.db.
     chat_db_path: Path | None = None
