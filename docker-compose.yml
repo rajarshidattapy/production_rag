@@ -107,6 +107,7 @@ services:
       context: .
       dockerfile: Dockerfile
     command:
+      - -m
       - celery
       - --app=src.celery_app:celery_app
       - worker
