@@ -892,7 +892,7 @@ def _run_ingest_job(job_id: str, shutdown: threading.Event | None = None) -> str
     if job is None:
         logger.warning("Discarding ingest message %s: no job record exists", job_id)
         return "discarded"
-    if job.get("status") not in _UNFINISHED_JOB_STATUSES:
+    if job.get("status") not in _UNFINISHED_JOB_STATUSES | {"interrupted"}:
         # RabbitMQ can redeliver after an acknowledgement is lost. Terminal records make
         # completion idempotent, including chat notes and reset jobs.
         return str(job["status"])
