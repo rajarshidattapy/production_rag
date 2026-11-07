@@ -79,7 +79,7 @@
       "id": 3,
       "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "percentChangeColorMode": "standard", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "showPercentChange": false, "textMode": "auto", "wideLayout": true},
       "targets": [
-        {"editorMode": "code", "expr": "100 * sum(rate(rag_http_requests_total{status_code=~\"5..\"}[$__rate_interval])) / clamp_min(sum(rate(rag_http_requests_total[$__rate_interval])), 0.000001)", "legendFormat": "5xx", "range": true, "refId": "A"}
+        {"editorMode": "code", "expr": "100 * sum(rate(rag_http_requests_total{status_code=~\"5..\",path!~\"/healthz|/readyz|/metrics\"}[$__rate_interval])) / clamp_min(sum(rate(rag_http_requests_total{path!~\"/healthz|/readyz|/metrics\"}[$__rate_interval])), 0.000001)", "legendFormat": "5xx", "range": true, "refId": "A"}
       ],
       "title": "HTTP 5xx rate",
       "type": "stat"
