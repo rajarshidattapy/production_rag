@@ -1039,6 +1039,8 @@ def _run_queued_ingest_job(message: dict[str, Any]) -> str:
     job_id = message["job_id"]
     record = message["record"]
     persisted = _read_persisted_ingest_jobs().get(job_id) or {}
+    if persisted.get("status") in {"completed", "cancelled", "failed"}:
+        return str(persisted["status"])
     _record_ingest_job(job_id, persist=False, **{**record, **persisted})
     try:
         source_path = _resolve_ingest_source(record["source"])
