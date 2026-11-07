@@ -6,7 +6,7 @@
 
 # Haven't scaled yet:
 
-1. **Grafana:** the built-in Observability dashboard covers a single server, so it only becomes necessary with several replicas.
+1. **Grafana:** now available through the optional Compose `observability` profile for deployments with several replicas; the built-in dashboard remains enough for one server.
 2. **Kafka:** there's no high-volume event stream or multiple consumers, only document jobs that a single in-process queue handles.
 
 1. **RabbitMQ:** background jobs run in a one-worker queue inside the API process, so it's only worth adding once indexing moves to separate worker services.

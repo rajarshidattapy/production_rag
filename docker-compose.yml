@@ -41,9 +41,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: rag-api
     ports:
-      - "8000:8000"
+      # A range keeps the one-replica default on 8000 and lets `--scale api=N`
+      # publish additional replicas on 8001, 8002, and so on.
+      - "${RAG_API_PORT_RANGE:-8000-8009}:8000"
     environment:
       - RAG_CHROMA_HOST=chroma
       - RAG_CHROMA_PORT=8000
@@ -77,5 +78,43 @@ services:
       retries: 3
       start_period: 30s
 
+  # Optional multi-replica observability. The built-in dashboard is enough for one
+  # API process; enable this profile when metrics need aggregating across replicas.
+  prometheus:
+    image: prom/prometheus:v3.16.0
+    profiles: ["observability"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-15d}
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:13.3.0
+    profiles: ["observability"]
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./deploy/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
 volumes:
   chroma_data:
+  prometheus_data:
+  grafana_data:

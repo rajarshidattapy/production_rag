@@ -640,6 +640,20 @@ The wrapper applies to the HTTP service and `scripts/evaluate.py`. `requirements
 
 `GET /metrics` exposes `rag_http_requests_total{path,method,status_code}` (requests matching no route share `path="unmatched"`), `rag_http_stream_errors_total{path,reason}` (streams that failed after answering 200), `rag_http_request_duration_seconds{path,method}`, and the `rag_healing_*` metrics listed under [Self-Healing Observability](#self-healing-observability). The UI's **Observability** button reads these along with `/healthz` and `/stats`, and excludes health checks and its own polling from the request counts.
 
+### Grafana for several replicas
+
+The built-in Observability dashboard intentionally reads the API process that serves it, which is enough for a single server. Once the API has several replicas, enable the optional Prometheus and Grafana profile to aggregate them:
+
+```bash
+docker compose --profile observability up --build --scale api=3
+```
+
+Compose publishes the replicas on the first available ports in `RAG_API_PORT_RANGE` (`8000-8009` by default). Open Grafana at `http://localhost:3000`, sign in with `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD`, and select **RAG / RAG API - Multi-replica overview**. Change the default password before binding Grafana to a non-loopback address.
+
+Prometheus discovers every container behind the Compose `api` DNS name instead of treating the service as one target. The provisioned dashboard shows healthy replicas, aggregate and per-replica request rates, 5xx percentage, route P95 latency, self-healing outcomes, and resident memory. Both Prometheus and Grafana bind to loopback by default and keep their data in named volumes. The base `docker compose up --build` command still starts no monitoring services.
+
+The supplied scrape configuration assumes `RAG_API_KEY` is empty, as it is by default. When API bearer authentication is enabled, mount the same token into Prometheus and add an `authorization.credentials_file` entry to `deploy/observability/prometheus.yml`; do not commit the token.
+
 ### OpenTelemetry Metrics
 
 With `MONITOR_ENABLED=true` and an OTLP endpoint reachable, these are exported:
@@ -680,9 +694,9 @@ Healing metrics are recorded wherever healing runs, so they appear on `/metrics`
 from src.monitoring import MetricsCollector, MonitoredRAGPipeline, Tracer
 from src.pipeline import RAGPipeline
 
-pipeline  = RAGPipeline()
-tracer    = Tracer(enabled=True)
-metrics   = MetricsCollector(enabled=True)
+pipeline = RAGPipeline()
+tracer = Tracer(enabled=True)
+metrics = MetricsCollector(enabled=True)
 monitored = MonitoredRAGPipeline(pipeline, tracer=tracer, metrics=metrics)
 
 answer, citations = monitored.query("What is RAG?", use_hybrid=True)
@@ -694,9 +708,9 @@ metrics.export_summary("monitoring-summary.json")
 ```python
 from src.monitoring.prompts import PromptRegistry
 
-registry    = PromptRegistry()
+registry = PromptRegistry()
 prompt_hash = registry.register("system_v1", "You are a helpful assistant…")
-changed     = registry.detect_change("system_v1", new_prompt_text)
+changed = registry.detect_change("system_v1", new_prompt_text)
 ```
 
 ---
@@ -728,6 +742,8 @@ docker compose up --build
 ```
 
 This starts the API, a private Chroma server, and a private ephemeral Redis instance. Redis shares query embeddings and authentication-attempt limits across API replicas; it does not cache generated answers or hold durable application data. Direct runs keep the original in-memory behavior unless `RAG_REDIS_URL` is set. For agent deployments, expose the service through MCP with `search_knowledge_base` and optional `ask_knowledge_base`; keep ingestion and admin operations private. Compose reads the `RAG_LLM_*`, `RAG_API_KEY`, `RAG_CORS_ORIGINS`, `MONITOR_ENABLED`, and provider key values from your `.env` for substitution. On Linux hosts, `./data` must be writable by UID 1001, the user the API runs as.
+
+Prometheus and Grafana are deliberately excluded from that default stack. See [Grafana for several replicas](#grafana-for-several-replicas) when the in-process dashboard no longer represents the whole deployment.
 
 ### Supply-chain security
 
