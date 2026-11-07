@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     # Required by POST /ingest/async. The API only publishes; a separate
     # ``python -m src.worker`` process consumes and indexes one job at a time.
     rabbitmq_url: str | None = Field(default=None, repr=False)
-    ingest_queue_name: str = Field(default="rag.ingest", pattern=r"^[A-Za-z0-9._-]{1,128}$")
+    ingest_queue_name: str = Field(default="rag.ingest", pattern=r"^(?!amq\.)[A-Za-z0-9._-]{1,128}$")
 
     # ---------- Chunking ----------
     chunk_size: int = 800
