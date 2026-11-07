@@ -93,6 +93,11 @@ def test_worker_restores_the_job_record_before_running(
     seen: list[tuple[str, Path, bool, str | None]] = []
 
     def run(job_id: str, path: Path, reset: bool, owner: str | None) -> None:
+        restored = api._find_ingest_job(job_id)
+        assert restored is not None
+        assert restored["status"] == "pending"
+        assert restored["source"] == str(source)
+        assert restored["user_id"] == "user-1"
         seen.append((job_id, path, reset, owner))
         api._record_ingest_job(job_id, status="completed")
 
