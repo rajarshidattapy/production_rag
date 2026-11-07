@@ -175,6 +175,14 @@ class Settings(BaseSettings):
     # `reset` on /ingest deletes every user's documents, so the API refuses it unless enabled.
     allow_store_reset: bool = False
 
+    # ---------- MCP ----------
+    # Serve the knowledge base to MCP clients at /mcp: search and answers, nothing that
+    # changes it. Uses RAG_API_KEY like every other route, so set one on a public server.
+    mcp_enabled: bool = False
+    # Comma-separated host names the server is reached by, such as rag.example.com. Local
+    # names are always accepted; "*" accepts any, for a proxy that rewrites Host.
+    mcp_allowed_hosts: str = ""
+
     # ---------- Start-up ----------
     # Load and run every model, and build the search indexes, before accepting requests, so
     # no request pays for it. A model that can't load stops the server from starting.

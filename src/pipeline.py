@@ -48,6 +48,12 @@ SHARED_OWNER = "shared"
 retrieval_owners: contextvars.ContextVar[tuple[str, ...] | None] = contextvars.ContextVar(
     "retrieval_owners", default=None
 )
+# Leave out documents limited to roles. Set for callers that have no roles, such as MCP
+# clients, until retrieval can check a caller's roles. Chunks stored before `restricted`
+# was recorded are left out too.
+retrieval_unrestricted_only: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "retrieval_unrestricted_only", default=False
+)
 
 
 # Browser uploads are saved as "<32 hex chars>_<original name>".
@@ -96,10 +102,24 @@ def _document_key(path: Path, data_dir: Path, owner: str) -> str:
 def _within_visible_owners(where: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Narrow a metadata filter to the documents this request may read."""
     owners = retrieval_owners.get()
-    if owners is None:
-        return where
-    scope: dict[str, Any] = {"owner": {"$in": list(owners)}}
-    return scope if where is None else {"$and": [scope, where]}
+    scopes: list[dict[str, Any]] = []
+    if owners is not None:
+        scopes.append({"owner": {"$in": list(owners)}})
+    if retrieval_unrestricted_only.get():
+        scopes.append({"restricted": False})
+    if where is not None:
+        scopes.append(where)
+    if not scopes:
+        return None
+    return scopes[0] if len(scopes) == 1 else {"$and": scopes}
+
+
+def readable(metadata: Mapping[str, Any]) -> bool:
+    """Whether this request may read a chunk or parent fetched by ID, by its metadata."""
+    owners = retrieval_owners.get()
+    if owners is not None and metadata.get("owner") not in owners:
+        return False
+    return not (retrieval_unrestricted_only.get() and metadata.get("restricted") is not False)
 
 
 # Chunks embedded and stored per step of an ingest. It sets how soon new text is searchable,
@@ -958,6 +978,39 @@ class RAGPipeline:
             yield ("token", chunk)
 
         yield ("citations", self.citation_formatter.build_citations(contexts))
+
+    def search(
+        self,
+        question: str,
+        top_k: int | None = None,
+        use_hybrid: bool = False,
+        use_reranker: bool = False,
+        filename: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve the passages ``query()`` would answer from, best first, without generating.
+
+        ``filename`` keeps the search to one document.
+
+        Raises:
+            ValueError: If the question is empty or exceeds the maximum length.
+        """
+        question = self._validate_question(question)
+        k, where = self._page_scope(question, top_k)
+        if filename:
+            document = {"filename": filename}
+            where = document if where is None else {"$and": [where, document]}
+        contexts = self._retrieve(
+            question,
+            use_hybrid=use_hybrid,
+            use_reranker=use_reranker,
+            k=k,
+            lang=_detect_language(question),
+            where=where,
+        )
+        if use_reranker and contexts:
+            return self._apply_reranker(question, contexts, top_k=k)
+        # A filtered search returns its hits in reading order.
+        return sorted(contexts, key=lambda c: c.get("score", 0.0), reverse=True)[:k]
 
     def _page_scope(self, question: str, top_k: int | None) -> tuple[int, dict[str, Any] | None]:
         """Return the chunk count and page filter to retrieve with for ``question``.
