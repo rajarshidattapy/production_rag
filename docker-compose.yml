@@ -105,6 +105,8 @@ services:
       dockerfile: Dockerfile
     container_name: rag-index-worker
     command: ["-m", "src.worker"]
+    healthcheck:
+      disable: true
     environment:
       - RAG_CHROMA_HOST=chroma
       - RAG_CHROMA_PORT=8000
