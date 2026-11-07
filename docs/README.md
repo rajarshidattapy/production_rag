@@ -32,6 +32,8 @@ Documents -> Loader -> Chunker -> ChromaDB (dense vectors, per language)
                                      |
                                      +-> BM25 index (built on first hybrid query)
 
+POST /ingest/async -> RabbitMQ -> indexing worker -> Loader (one job at a time)
+
 Query -> Detect language -> Vector search            (default)
                             or Hybrid search         (use_hybrid=true)
                          -> Cross-encoder reranker   (only if use_reranker=true)
@@ -50,8 +52,11 @@ MCP clients -> /mcp (read-only) -> search_knowledge_base, ask_knowledge_base, ge
 flowchart TD
     UI[Browser UI] -->|PDF only| UPLOAD["POST /upload<br/>checks .pdf extension and size"]
     UPLOAD --> SAVE[Save under data/uploads]
-    SAVE --> INGEST[Ingest]
-    SERVER["POST /ingest, POST /ingest/async,<br/>or scripts/ingest.py"] -->|path inside the data directory| INGEST
+    SAVE --> ASYNC["POST /ingest/async"]
+    ASYNC --> QUEUE[(RabbitMQ)]
+    QUEUE --> WORKER["Indexing worker<br/>one job at a time"]
+    WORKER --> INGEST[Ingest]
+    SERVER["POST /ingest<br/>or scripts/ingest.py"] -->|path inside the data directory| INGEST
     INGEST --> LOAD["Load PDF, TXT, MD, or JSON<br/>(JSON is stored as raw text)"]
     LOAD --> CHUNK[Split into overlapping chunks]
     CHUNK --> LANG[Detect language per chunk]
@@ -126,8 +131,9 @@ Attaching PDFs or choosing a folder under **Server folder** in the UI starts a b
 - **Bad files:** A file that can't be read, or a PDF with no extractable text, is listed on the job and skipped. The rest of the collection still gets indexed.
 - **Cancel:** Stops after the current batch, which can take about a minute on a CPU. Text already indexed stays searchable.
 - **Run again:** Available on a cancelled, failed, or interrupted job. Chunks already stored are skipped, so it resumes rather than re-embedding everything. It reads every file again to find what's missing.
-- **Restarts:** A graceful shutdown waits for the current batch, so a container manager's stop timeout may end it first, which counts as a crash. After a restart or crash the job is reported as `interrupted`. A crash loses at most the chunks still waiting for their batch, and **Run again** restores them.
-- **Queue:** Each server process runs one job at a time, in order, because indexing is CPU-bound. Questions keep working meanwhile.
+- **Restarts:** RabbitMQ keeps queued jobs and re-delivers any job whose worker exits before acknowledging it. A graceful worker shutdown stops after the current batch and requeues the job; already stored chunks are skipped on the next attempt. API restarts do not interrupt indexing.
+- **Queue:** The separate worker accepts one RabbitMQ job at a time because indexing is CPU-bound. API replicas share the same durable FIFO queue, and questions no longer compete with indexing inside the API process.
+- **State:** Progress, cancellation, ownership, and the latest 500 job records live in the application SQLite database, so API and worker processes see the same state. Keep the shared `data` volume on local disk.
 - **Uploads:** Files go to the server one at a time before the job starts, so keep the tab open until the job appears. For a very large collection, put the files on the server and use **Server folder**. The path must be inside `RAG_DATA_DIR`.
 - **Visibility:** A job started while signed in belongs to that user, and so do the documents it adds. `GET /ingest/jobs` lists only your own jobs, and other users get `404` for them.
 
@@ -378,14 +384,16 @@ curl -N -X POST http://localhost:8000/query/stream \
 
 ### Run the API Server
 
-Run Chroma as its own server, as production does. Set `RAG_CHROMA_HOST=127.0.0.1` and `RAG_CHROMA_PORT=8001` in `.env`, then start each in its own terminal, with Chroma first:
+Run Chroma and RabbitMQ as separate services, as production does. Set `RAG_CHROMA_HOST=127.0.0.1`, `RAG_CHROMA_PORT=8001`, and `RAG_RABBITMQ_URL=amqp://guest:guest@127.0.0.1:5672/%2F` in `.env`, then start the API and worker in separate terminals:
 
 ```bash
 chroma run --path data/chroma_server --port 8001
+docker run --rm --name rag-rabbitmq -p 5672:5672 rabbitmq:4.2.9-alpine
 uvicorn src.api:app --reload --host 0.0.0.0 --port 8000
+python -m src.worker
 ```
 
-If Chroma isn't running, queries return `503` and `/readyz` reports not ready. They recover without restarting the API once Chroma is back. Leaving `RAG_CHROMA_HOST` unset runs Chroma inside the app with no server to start, but that mode has a [known read bug](https://github.com/chroma-core/chroma/issues/7946) the app has to work around.
+If Chroma isn't running, queries return `503` and `/readyz` reports not ready. They recover without restarting the API once Chroma is back. If RabbitMQ is unavailable, `POST /ingest/async` returns `503`; synchronous ingestion and queries continue to work. Leaving `RAG_CHROMA_HOST` unset runs Chroma inside the app with no server to start, but that mode has a [known read bug](https://github.com/chroma-core/chroma/issues/7946) the app has to work around.
 
 ---
 
@@ -571,6 +579,8 @@ All settings use the `RAG_` prefix and can be set via `.env` or environment vari
 | `RAG_REDIS_KEY_PREFIX`           | `rag`                                  | Namespace for this deployment's Redis keys                 |
 | `RAG_REDIS_SOCKET_TIMEOUT_SECONDS` | `0.5`                                | Redis connect and command timeout                           |
 | `RAG_REDIS_EMBEDDING_CACHE_TTL_SECONDS` | `86400`                         | Shared embedding lifetime; local LRU remains size-bounded   |
+| `RAG_RABBITMQ_URL`               | *(unset)*                              | RabbitMQ URL required by async ingest and `src.worker`      |
+| `RAG_INGEST_QUEUE_NAME`          | `rag.ingest`                           | Durable RabbitMQ queue used for indexing                    |
 | `RAG_RERANKER_MODEL`             | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Cross-encoder model                                         |
 | `RAG_FAITHFULNESS_THRESHOLD`     | `0.7`                                  | Minimum faithfulness score for CI gate                      |
 | `RAG_CORS_ORIGINS`               | `*`                                    | Comma-separated allowed CORS origins                        |
@@ -760,6 +770,8 @@ docker build -t production-rag:latest .
 
 ### Run
 
+The standalone container supports queries and synchronous `POST /ingest`. Use Compose below when you need `POST /ingest/async`, because background indexing also requires RabbitMQ and the worker service.
+
 ```bash
 docker run -p 8000:8000 \
   -e OPENAI_API_KEY=sk-... \
@@ -774,7 +786,7 @@ docker run -p 8000:8000 \
 docker compose up --build
 ```
 
-This starts the API, a private Chroma server, and a private ephemeral Redis instance. Redis shares query embeddings and authentication-attempt limits across API replicas; it does not cache generated answers or hold durable application data. Direct runs keep the original in-memory behavior unless `RAG_REDIS_URL` is set. For agents, set `RAG_MCP_ENABLED=true` and `RAG_MCP_ALLOWED_HOSTS` to serve the read-only [MCP server](#mcp-server) at `/mcp`. Compose reads the `RAG_LLM_*`, `RAG_API_KEY`, `RAG_CORS_ORIGINS`, `MONITOR_ENABLED`, and provider key values from your `.env` for substitution. On Linux hosts, `./data` must be writable by UID 1001, the user the API runs as.
+This starts the API, one indexing worker, a private RabbitMQ broker, a private Chroma server, and a private ephemeral Redis instance. RabbitMQ holds durable ingest messages; job state remains in `data/chat.db`, and the worker acknowledges a message only after the job reaches a terminal state. Redis shares query embeddings and authentication-attempt limits across API replicas; it does not cache generated answers or hold durable application data. Direct runs keep the original in-memory cache behavior unless `RAG_REDIS_URL` is set. For agents, set `RAG_MCP_ENABLED=true` and `RAG_MCP_ALLOWED_HOSTS` to serve the read-only [MCP server](#mcp-server) at `/mcp`. Compose reads the `RAG_LLM_*`, `RAG_API_KEY`, `RAG_CORS_ORIGINS`, `MONITOR_ENABLED`, and provider key values from your `.env` for substitution. On Linux hosts, `./data` must be writable by UID 1001, the user both application containers run as.
 
 ### Supply-chain security
 
@@ -806,7 +818,7 @@ This project builds retrieval, fusion, reranking, and generation directly agains
 
 What changes as load grows, based on what has actually been measured. All numbers are from one Windows 11 laptop (16.8 GB RAM), and retrieval timings use stub embeddings. Treat them as relative guidance, not capacity figures.
 
-- **Horizontal scaling:** The drill ran two API replicas with separate disks on one Chroma server. Reads worked, a document ingested through one replica was found by the other, and a replica recovers on its own after another resets the store. Two caveats: async job status is only shared if replicas share a disk, and each replica detects BM25 staleness by chunk count, so a same-count replacement ingested elsewhere goes unnoticed.
+- **Horizontal scaling:** The drill ran two API replicas with separate disks on one Chroma server. Reads worked, a document ingested through one replica was found by the other, and a replica recovers on its own after another resets the store. RabbitMQ now gives replicas one ingest queue, but job/account state still uses SQLite on local disk, so multi-host replicas need a database server. Each replica also detects BM25 staleness by chunk count, so a same-count replacement ingested elsewhere goes unnoticed.
 - **Hybrid search at scale:** At 50k chunks, BM25 queries took 2-3 ms and a cold index load 0.2 s. A full rebuild took about 5 s. Memory measured at 100k chunks was about 1.2 KB per chunk, which extrapolates to about 1.2 GB at 1M chunks and needs `RAG_BM25_MAX_INDEX_MB` near 2000. The 1M figures have not been run.
 - **Vector search:** `RAG_HNSW_EF_SEARCH` matters most. On 50k synthetic vectors, recall@10 was 0.74 at 10, 0.996 at 100, and 1.000 at 200, with the same latency of about 1.4 ms. The default is 200. A single Chroma instance has no sharding or replicas. The per-language collections are a natural shard boundary if you move to a distributed vector database.
 - **Where the time goes:** In production the LLM call and reranker should dominate, not the vector store. This has not been measured with a real provider or model, so load-test those before sizing anything.
@@ -873,7 +885,6 @@ The drill uses real API and Chroma server processes on loopback, a local fake LL
 
 4. **Timed-out work can keep running.** After a 504, a self-healing or retrieval worker thread continues until its own LLM client timeout ends it, so sustained timeouts can tie up worker threads.
 5. **BM25 staleness is detected by chunk count**, so a same-count replacement ingested through another replica goes unnoticed.
-6. **Async job status needs a shared disk** to be visible across replicas. Two replicas sharing one could also mislabel a job still running on the other as `interrupted`.
 
 **Observability**
 
@@ -883,7 +894,7 @@ The drill uses real API and Chroma server processes on loopback, a local fake LL
 **Background indexing**
 
 - **Run again reads every file.** It skips embedding stored chunks, but loading and chunking a large collection again still takes time.
-- **Each replica has its own job queue**, so jobs on different replicas run at the same time. Cancelling only works on the replica running the job.
+- **The shared FIFO queue has no per-user fairness**, so one tenant can leave many jobs ahead of everybody else.
 - **Scanned PDFs are not indexed.** They are reported as having no extractable text; there is no OCR.
 
 **Accounts**

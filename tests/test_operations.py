@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 import subprocess
 import sys
@@ -281,8 +280,7 @@ def test_finished_job_status_survives_a_restart(
 ) -> None:
     api._record_ingest_job("job-1", status="completed", chunks_ingested=3, total_chunks=3)
 
-    api._ingest_jobs.clear()  # what a restart does to the in-memory record
-    monkeypatch.setattr(api, "_INSTANCE_ID", "a-new-process")
+    monkeypatch.setattr(api, "_ingest_job_store", None)
 
     body = client.get("/ingest/jobs/job-1").json()
     assert body["status"] == "completed"
@@ -290,36 +288,35 @@ def test_finished_job_status_survives_a_restart(
     assert "owner" not in body
 
 
-def test_job_cut_off_by_a_restart_is_reported_as_interrupted(
+def test_api_restart_does_not_orphan_worker_owned_job(
     api, client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     api._record_ingest_job("job-2", status="running")
     assert client.get("/ingest/jobs/job-2").json()["status"] == "running"
 
-    api._ingest_jobs.clear()
-    monkeypatch.setattr(api, "_INSTANCE_ID", "a-new-process")
+    monkeypatch.setattr(api, "_ingest_job_store", None)
 
     body = client.get("/ingest/jobs/job-2").json()
-    assert body["status"] == "interrupted"
-    assert "restarted" in body["error"]
+    assert body["status"] == "running"
 
 
 def test_unknown_job_is_still_404(client: TestClient) -> None:
     assert client.get("/ingest/jobs/nope").status_code == 404
 
 
-def test_job_file_is_bounded_and_tolerates_corruption(
+def test_job_history_is_bounded_without_dropping_active_work(
     api, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(api, "_INGEST_JOBS_MAX", 2)
-    path = api._ingest_jobs_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(api, "_ingest_job_store", None)
 
     for job_id in ("a", "b", "c"):
         api._record_ingest_job(job_id, status="completed")
 
-    assert list(json.loads(path.read_text(encoding="utf-8"))) == ["b", "c"]
+    store = api.get_ingest_job_store()
+    assert store.get("a") is None
+    assert store.get("b") is not None
+    assert store.get("c") is not None
 
 
 # ---------------------------------------------------------------------------

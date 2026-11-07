@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -376,27 +375,14 @@ class TestJobLifecycle:
         assert "Chroma" in job["error"]
         assert job["chunks_ingested"] == 1
 
-    def test_progress_saves_are_throttled_but_the_end_is_always_saved(
-        self, corpus: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        saves: list[str] = []
-        real = api_app._persist_ingest_job
-
-        def counting(job_id: str, record: dict[str, Any]) -> None:
-            real(job_id, record)
-            saves.append(record["status"])
-
-        monkeypatch.setattr(api_app, "_persist_ingest_job", counting)
+    def test_progress_and_result_are_durable_in_the_shared_store(self, corpus: Path) -> None:
         client = TestClient(api_app.app)
         job_id = _start(client, corpus)
-        _wait(client, job_id)
-        # The status is visible in memory a moment before it reaches the disk.
-        deadline = time.monotonic() + 10
-        while saves[-1] != "completed" and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert saves[-1] == "completed"
-        assert len(saves) <= 5
-        assert json.loads(api_app._ingest_jobs_path().read_text())[job_id]["status"] == "completed"
+        assert _wait(client, job_id)["status"] == "completed"
+        persisted = api_app.get_ingest_job_store().get(job_id)
+        assert persisted is not None
+        assert persisted["status"] == "completed"
+        assert persisted["files_done"] == 5
 
 
 class TestCancelAndRetry:
@@ -485,17 +471,17 @@ class TestCancelAndRetry:
 
 
 class TestRestartAndShutdown:
-    def test_shutdown_stops_a_running_job_as_interrupted(self, corpus: Path, gate: Gate) -> None:
+    def test_api_shutdown_does_not_interrupt_the_separate_worker(
+        self, corpus: Path, gate: Gate
+    ) -> None:
         with TestClient(api_app.app) as client:
             job_id = _start(client, corpus)
             assert gate.reached.wait(30)
-        gate.release.set()  # leaving the block ran the app's shutdown
+        gate.release.set()
         job = _wait(TestClient(api_app.app), job_id)
-        assert job["status"] == "interrupted"
+        assert job["status"] == "completed"
 
-    def test_job_cut_off_by_a_crash_can_be_run_again_after_restart(
-        self, corpus: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_redelivered_job_resumes_after_a_worker_crash(self, corpus: Path) -> None:
         client = _signed_in()
         user = api_app.get_chat_store().user_for_session(client.cookies["rag_session"])
         assert user is not None
@@ -509,25 +495,15 @@ class TestRestartAndShutdown:
             files_total=5,
             files_done=2,
         )
-        api_app._ingest_jobs.clear()
-        monkeypatch.setattr(api_app, "_INSTANCE_ID", "a-new-process")
+        assert api_app._run_ingest_job("crashed") == "completed"
+        assert client.get("/ingest/jobs/crashed").json()["status"] == "completed"
 
-        listed = client.get("/ingest/jobs").json()
-        assert [(j["job_id"], j["status"]) for j in listed] == [("crashed", "interrupted")]
-        assert listed[0]["files_done"] == 2
-
-        response = client.post("/ingest/jobs/crashed/retry")
-        assert response.status_code == 202
-        assert _wait(client, response.json()["job_id"])["status"] == "completed"
-
-    def test_cancel_after_restart_explains_it_is_not_running_here(
-        self, corpus: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_cancel_is_shared_between_api_and_worker(self, corpus: Path) -> None:
         client = TestClient(api_app.app)
         api_app._record_ingest_job("orphan", status="running", source=str(corpus))
-        api_app._ingest_jobs.clear()
-        monkeypatch.setattr(api_app, "_INSTANCE_ID", "a-new-process")
-        assert client.post("/ingest/jobs/orphan/cancel").status_code == 409
+        response = client.post("/ingest/jobs/orphan/cancel")
+        assert response.status_code == 200
+        assert api_app._find_ingest_job("orphan")["cancel_requested"] is True
 
 
 class TestJobOwnership:
@@ -679,14 +655,15 @@ class TestChatNotes:
         _wait(client, new_id)
         assert "3 documents" not in client.get(f"/chats/{chat_id}").json()["files"]
 
-    def test_interruption_adds_no_note_because_a_rerun_is_expected(
-        self, corpus: Path, gate: Gate
+    def test_worker_interruption_adds_no_note_because_the_job_is_requeued(
+        self, corpus: Path, gate: Gate, local_ingest_worker: threading.Event
     ) -> None:
         with TestClient(api_app.app) as client:
             client.post("/auth/register", json={"username": "alice", "password": PASSWORD})
             chat_id = client.post("/chats", json={"title": "Docs"}).json()["id"]
             job_id = _start(client, corpus, chat_id=chat_id)
             assert gate.reached.wait(30)
+            local_ingest_worker.set()
         gate.release.set()
         assert _wait(client, job_id)["status"] == "interrupted"
         assert client.get(f"/chats/{chat_id}").json()["messages"] == []

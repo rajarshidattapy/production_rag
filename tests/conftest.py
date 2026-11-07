@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -48,6 +50,24 @@ def isolate_chroma_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(settings, "allow_store_reset", True)
     # Loading real models at every app start would make the suite slow; warm-up has its tests.
     monkeypatch.setattr(settings, "warm_up_on_start", False)
+
+
+@pytest.fixture(autouse=True)
+def local_ingest_worker(monkeypatch: pytest.MonkeyPatch) -> Event:
+    """Exercise API/worker behavior without requiring RabbitMQ in unit tests."""
+    from src import api
+
+    shutdown = Event()
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-index-worker")
+    futures = []
+
+    def publish(job_id: str) -> None:
+        futures.append(executor.submit(api._run_ingest_job, job_id, shutdown))
+
+    monkeypatch.setattr(api, "_publish_ingest_job", publish)
+    yield shutdown
+    shutdown.set()
+    executor.shutdown(wait=True)
 
 
 @pytest.fixture(autouse=True)

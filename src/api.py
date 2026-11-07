@@ -18,9 +18,7 @@ import secrets
 import threading
 import time
 import uuid
-from collections import OrderedDict
 from collections.abc import AsyncGenerator, AsyncIterator
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -45,6 +43,8 @@ from src.config import settings as _settings
 from src.generation.citations import CitationFormatter
 from src.healing.metrics import HEALING_REGISTRY
 from src.ingestion import screening
+from src.ingestion.jobs import IngestJobStore
+from src.ingestion.queue import IngestQueueUnavailable, publish_job
 from src.pipeline import SHARED_OWNER, IngestProgress, RAGPipeline, retrieval_owners
 from src.retrieval.vector_store import VectorStoreUnavailableError
 from src.shared_state import build_attempt_limiter, close_redis_clients, get_redis_client
@@ -130,7 +130,6 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         async with _serve_mcp():
             yield
     finally:
-        _interrupt_active_ingest_jobs()
         close_redis_clients()
 
 
@@ -800,19 +799,8 @@ async def ingest(request: IngestRequest, rag_session: str | None = Cookie(None))
 # client/proxy timeout on the synchronous /ingest endpoint above.
 # ---------------------------------------------------------------------------
 _INGEST_JOBS_MAX = 500
-_ingest_jobs: OrderedDict[str, dict[str, Any]] = OrderedDict()
-# One at a time, in order: indexing is CPU-bound, so parallel jobs would only slow each other,
-# and a job with reset=True must not run underneath another job.
-_ingest_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rag-ingest")
-# Stop signal for each job this process hasn't finished yet.
-_active_ingest_jobs: dict[str, threading.Event] = {}
-_ingest_jobs_shut_down: set[str] = set()
-# Identifies this process, so a job left unfinished by a previous one can be recognised.
-_INSTANCE_ID = uuid.uuid4().hex
-_ingest_jobs_file_lock = threading.Lock()
-_ingest_jobs_lock = threading.RLock()
-# Rewriting the status file on every batch would add up on a long job.
-_INGEST_PROGRESS_SAVE_SECONDS = 2.0
+_ingest_job_store: IngestJobStore | None = None
+_ingest_job_store_lock = threading.Lock()
 _RESUMABLE_JOB_STATUSES = {"cancelled", "interrupted", "failed"}
 _UNFINISHED_JOB_STATUSES = {"pending", "running"}
 # Past this many documents a chat records a count, not every filename.
@@ -820,66 +808,30 @@ _MAX_CHAT_FILE_NAMES = 20
 _UPLOAD_PREFIX_RE = re.compile(r"^[0-9a-f]{32}_")
 
 
-def _ingest_jobs_path() -> Path:
-    return Path(_settings.data_dir) / "ingest_jobs.json"
+def get_ingest_job_store() -> IngestJobStore:
+    """Return the durable store shared by API and indexing worker processes."""
+    global _ingest_job_store
+    path = Path(_settings.chat_db_file)
+    with _ingest_job_store_lock:
+        if _ingest_job_store is None or _ingest_job_store.path != path:
+            _ingest_job_store = IngestJobStore(path, max_jobs=_INGEST_JOBS_MAX)
+        _ingest_job_store.max_jobs = _INGEST_JOBS_MAX
+        return _ingest_job_store
 
 
-def _read_persisted_ingest_jobs() -> dict[str, dict[str, Any]]:
-    try:
-        with open(_ingest_jobs_path(), encoding="utf-8") as f:
-            jobs = json.load(f)
-    except (OSError, ValueError):
-        return {}
-    return jobs if isinstance(jobs, dict) else {}
-
-
-def _persist_ingest_job(job_id: str, record: dict[str, Any]) -> None:
-    """Save job status so it survives a restart. Best effort: never fails the job itself."""
-    path = _ingest_jobs_path()
-    tmp = path.with_name(f"{path.name}.{_INSTANCE_ID}.tmp")
-    try:
-        with _ingest_jobs_file_lock:
-            jobs = _read_persisted_ingest_jobs()
-            jobs.pop(job_id, None)
-            jobs[job_id] = record
-            for old_id in list(jobs)[: max(0, len(jobs) - _INGEST_JOBS_MAX)]:
-                del jobs[old_id]
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(jobs, f)
-            os.replace(tmp, path)
-    except OSError as exc:
-        logger.warning("Could not save ingest job status: %s", exc)
-
-
-def _record_ingest_job(job_id: str, *, persist: bool = True, **fields: Any) -> None:
-    with _ingest_jobs_lock:
-        _ingest_jobs[job_id] = {**_ingest_jobs.get(job_id, {}), **fields, "owner": _INSTANCE_ID}
-        _ingest_jobs.move_to_end(job_id)
-        while len(_ingest_jobs) > _INGEST_JOBS_MAX:
-            _ingest_jobs.popitem(last=False)
-        record = dict(_ingest_jobs[job_id])
-    if persist:
-        _persist_ingest_job(job_id, record)
+def _record_ingest_job(job_id: str, **fields: Any) -> dict[str, Any]:
+    return get_ingest_job_store().put(job_id, **fields)
 
 
 def _find_ingest_job(job_id: str) -> dict[str, Any] | None:
-    with _ingest_jobs_lock:
-        job = _ingest_jobs.get(job_id)
-    return job or _read_persisted_ingest_jobs().get(job_id)
+    return get_ingest_job_store().get(job_id)
 
 
 def _ingest_job_view(job_id: str, job: dict[str, Any]) -> IngestJobStatusResponse:
-    """A job as clients see it: internal fields dropped, and orphaned work called what it is."""
-    if job.get("status") in _UNFINISHED_JOB_STATUSES and job.get("owner") != _INSTANCE_ID:
-        job = {
-            **job,
-            "status": "interrupted",
-            "error": "The server restarted before this job finished.",
-        }
+    """A job as clients see it, with internal routing fields removed."""
     return IngestJobStatusResponse(
-        job_id=job_id, **{k: v for k, v in job.items() if k not in ("owner", "user_id", "source")}
+        job_id=job_id,
+        **{key: value for key, value in job.items() if key not in ("user_id", "source", "reset")},
     )
 
 
@@ -916,8 +868,7 @@ def _ingest_chat_note(
 
 def _note_ingest_result_in_chat(job_id: str, status: str, progress: IngestProgress) -> None:
     """Tell the chat how the job ended, so the result is there even if the tab was closed."""
-    with _ingest_jobs_lock:
-        job = dict(_ingest_jobs.get(job_id, {}))
+    job = _find_ingest_job(job_id) or {}
     if not job.get("chat_id") or status == "interrupted":
         return  # an interrupted job is expected to be run again
     try:
@@ -929,41 +880,53 @@ def _note_ingest_result_in_chat(job_id: str, status: str, progress: IngestProgre
             note=note,
             replacing=job.get("replaces_chat_files"),
         )
-        _record_ingest_job(job_id, persist=False, chat_files=files)
+        _record_ingest_job(job_id, chat_files=files)
     except Exception:
         logger.exception("Could not note ingest job %s in its chat", job_id)
 
 
-def _run_ingest_job(job_id: str, source_path: Path, reset: bool, owner: str | None) -> None:
-    stop = _active_ingest_jobs[job_id]
+def _run_ingest_job(job_id: str, shutdown: threading.Event | None = None) -> str:
+    """Execute one broker-delivered job. Called only by the indexing worker."""
+    shutdown = shutdown or threading.Event()
+    job = _find_ingest_job(job_id)
+    if job is None:
+        logger.warning("Discarding ingest message %s: no job record exists", job_id)
+        return "discarded"
+    if job.get("status") not in _UNFINISHED_JOB_STATUSES:
+        # RabbitMQ can redeliver after an acknowledgement is lost. Terminal records make
+        # completion idempotent, including chat notes and reset jobs.
+        return str(job["status"])
+
     latest = IngestProgress()
-    last_saved = 0.0
 
     def on_progress(progress: IngestProgress) -> None:
-        nonlocal latest, last_saved
+        nonlocal latest
         latest = progress
-        now = time.monotonic()
-        save = now - last_saved >= _INGEST_PROGRESS_SAVE_SECONDS
-        if save:
-            last_saved = now
-        _record_ingest_job(job_id, persist=save, **_progress_fields(progress))
+        _record_ingest_job(job_id, **_progress_fields(progress))
+
+    def should_stop() -> bool:
+        current = _find_ingest_job(job_id)
+        return shutdown.is_set() or bool(current and current.get("cancel_requested"))
 
     def stopped_status() -> str:
-        return "interrupted" if job_id in _ingest_jobs_shut_down else "cancelled"
+        return "interrupted" if shutdown.is_set() else "cancelled"
 
     try:
-        if stop.is_set():  # cancelled while waiting its turn
+        if should_stop():  # cancelled while queued, or the worker is shutting down
             status = stopped_status()
             _note_ingest_result_in_chat(job_id, status, latest)
             _record_ingest_job(job_id, status=status)
-            return
+            return status
 
-        _record_ingest_job(job_id, status="running")
+        _record_ingest_job(job_id, status="running", error=None)
         pipeline = get_pipeline()
-        if reset:
+        if job.get("reset"):
             pipeline.reset()
         chunks_ingested = pipeline.ingest(
-            source_path, on_progress=on_progress, should_stop=stop.is_set, owner=owner
+            Path(job["source"]),
+            on_progress=on_progress,
+            should_stop=should_stop,
+            owner=job.get("user_id"),
         )
         total_chunks = pipeline.stats()["chunks_in_store"]
         status = stopped_status() if latest.stopped else "completed"
@@ -975,30 +938,36 @@ def _run_ingest_job(job_id: str, source_path: Path, reset: bool, owner: str | No
             total_chunks=total_chunks,
             **{**_progress_fields(latest), "chunks_ingested": chunks_ingested},
         )
+        return status
     except Exception as exc:
         logger.warning("Ingest job %s failed: %s", job_id, exc)
         _note_ingest_result_in_chat(job_id, "failed", latest)
         _record_ingest_job(job_id, status="failed", error=str(exc), **_progress_fields(latest))
-    finally:
-        _active_ingest_jobs.pop(job_id, None)
-        _ingest_jobs_shut_down.discard(job_id)
+        return "failed"
+
+
+def _publish_ingest_job(job_id: str) -> None:
+    if not _settings.rabbitmq_url:
+        raise IngestQueueUnavailable("RAG_RABBITMQ_URL is not configured.")
+    publish_job(_settings.rabbitmq_url, _settings.ingest_queue_name, job_id)
 
 
 def _enqueue_ingest_job(source_path: Path, reset: bool = False, **fields: Any) -> str:
     job_id = str(uuid.uuid4())
-    _active_ingest_jobs[job_id] = threading.Event()
     _record_ingest_job(
-        job_id, status="pending", source=str(source_path), created_at=time.time(), **fields
+        job_id,
+        status="pending",
+        source=str(source_path),
+        reset=reset,
+        created_at=time.time(),
+        **fields,
     )
-    _ingest_worker.submit(_run_ingest_job, job_id, source_path, reset, fields.get("user_id"))
+    try:
+        _publish_ingest_job(job_id)
+    except IngestQueueUnavailable as exc:
+        _record_ingest_job(job_id, status="failed", error=str(exc))
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return job_id
-
-
-def _interrupt_active_ingest_jobs() -> None:
-    """Called at shutdown: stop promptly, so exit doesn't wait for a long job to finish."""
-    for job_id, stop in list(_active_ingest_jobs.items()):
-        _ingest_jobs_shut_down.add(job_id)
-        stop.set()
 
 
 def _user_for_session(rag_session: str | None) -> User | None:
@@ -1025,8 +994,9 @@ async def ingest_async(
 
     Poll ``GET /ingest/jobs/{job_id}`` for status. Path validation happens
     synchronously before the job is created, so a bad path still fails fast
-    with a 400 rather than surfacing as an async job failure. Jobs run one at a
-    time in the order they arrive. Text is searchable as each batch is stored.
+    with a 400 rather than surfacing as an async job failure. RabbitMQ delivers
+    jobs to the separate indexing worker, one at a time. Text is searchable as
+    each batch is stored.
     """
     _refuse_reset_unless_allowed(request.reset)
     source_path = _resolve_ingest_source(request.source)
@@ -1066,12 +1036,10 @@ def cancel_ingest_job(
 ) -> IngestJobStatusResponse:
     """Stop a job after its current batch. Text already indexed stays searchable."""
     job = _job_for_requester(job_id, rag_session)
-    stop = _active_ingest_jobs.get(job_id)
-    if stop is None or job.get("status") not in _UNFINISHED_JOB_STATUSES:
-        raise HTTPException(status_code=409, detail="This job is not running on this server.")
-    stop.set()
-    _record_ingest_job(job_id, cancel_requested=True)
-    return _ingest_job_view(job_id, {**job, "cancel_requested": True})
+    if job.get("status") not in _UNFINISHED_JOB_STATUSES:
+        raise HTTPException(status_code=409, detail="This job is no longer running.")
+    updated = _record_ingest_job(job_id, cancel_requested=True)
+    return _ingest_job_view(job_id, updated)
 
 
 @app.post(
@@ -1372,12 +1340,9 @@ def me(user: User = _signed_in) -> AccountResponse:
 
 @app.get("/ingest/jobs", response_model=list[IngestJobStatusResponse], dependencies=[_auth])
 def list_ingest_jobs(user: User = _signed_in) -> list[IngestJobStatusResponse]:
-    """List your most recent ingest jobs, newest first, including any cut off by a restart."""
-    with _ingest_jobs_lock:
-        jobs = {**_read_persisted_ingest_jobs(), **_ingest_jobs}
-    mine = [(i, j) for i, j in jobs.items() if j.get("user_id") == user.id]
-    mine.sort(key=lambda item: item[1].get("created_at") or 0, reverse=True)
-    return [_ingest_job_view(i, j) for i, j in mine[:50]]
+    """List your most recent ingest jobs, newest first."""
+    jobs = get_ingest_job_store().list_for_user(user.id, limit=50)
+    return [_ingest_job_view(job_id, job) for job_id, job in jobs]
 
 
 @app.get("/chats", response_model=list[ChatSummary], dependencies=[_auth])

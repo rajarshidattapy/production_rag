@@ -19,11 +19,10 @@
 
 - **Embedding is the bottleneck.** PyTorch is pinned to one thread, so a million chunks would take about 70 hours. Use a GPU or more threads for the indexing worker. *Measured at about 4 chunks per second; the 70 hours is extrapolated.*
 - **Batch size needs revisiting with faster embedding.** Small batches add overhead that the slow CPU model hides. *Measured: 551 s vs 360 s for 40,000 chunks with stub embeddings.*
-- **Indexing runs inside the API process.** It competes with queries for CPU, a deploy interrupts it, and each replica has its own queue, where one big job makes everyone else's wait. Needs a separate worker service with a shared queue and per-user fairness. *From the code.*
+- **The shared ingest queue has no per-user fairness.** One large tenant can make every later tenant wait behind its jobs; schedule across users before adding more workers. *From the code.*
 - **Run again re-reads every file.** Track finished files by content hash so a resume skips them. *From the code.*
 - **Idempotent Ingestion Jobs:** Prevent duplicate job submissions from creating repeated or inconsistent document indexing operations.
 - **Dead-Letter Job Handling:** Preserve failed ingestion jobs for inspection, diagnosis, and controlled reprocessing.
-- **Job status is a whole file, read on every poll** and rewritten on every save, holding up to 500 jobs. Move it to the database. *From the code.*
 
 ### Stage 2: Retrieval
 
@@ -117,7 +116,7 @@
 
 ## Final boss: Deploy
 
-The cheapest setup that works is **one VM running Docker Compose**: the API, Chroma, Redis, and Caddy for HTTPS, all on the same machine. Expect about $26 to$**30 a month plus your LLM bill**. This setup hasn't been run yet, so check everything on the first deploy.
+The cheapest setup that works is **one VM running Docker Compose**: the API, indexing worker, RabbitMQ, Chroma, Redis, and Caddy for HTTPS, all on the same machine. Expect about $26 to$**30 a month plus your LLM bill**. This setup hasn't been run yet, so check everything on the first deploy.
 
 ### What to use
 
@@ -131,7 +130,7 @@ The cheapest setup that works is **one VM running Docker Compose**: the API, Chr
 | SageMaker, Kubernetes, load balancer, managed databases, Grafana        | **Skip**                                       | The LLM is an outside API and the local models run on CPU, so one VM needs none of these                   |
 
 
-4 GB is the starting point: the API alone peaked at about 1.2 to 1.4 GB while indexing (measured on Windows), Redis is capped at 256 MB, and the reranker and Chroma are on top of that and not yet measured. Check real use with `docker stats`, and move to 8 GB if it gets tight, or if you use the reranker heavily.
+4 GB is only a starting point: the API previously peaked at about 1.2 to 1.4 GB while indexing (measured on Windows), and the separate worker now loads its own embedding model while Redis, RabbitMQ, the reranker, and Chroma also need memory. Check real use with `docker stats`; expect to move to 8 GB if it gets tight or if you use the reranker heavily.
 
 ### Monthly cost
 
@@ -163,7 +162,7 @@ Vultr's automatic backups add 20%, about $4 to$5. A domain is roughly $1 a month
 
       Also set `FORWARDED_ALLOW_IPS=*` in `.env`, but only once port 8000 isn't published. Without it, every user shares Caddy's address and one login limit. With `RAG_MCP_ENABLED=true`, also set `RAG_MCP_ALLOWED_HOSTS=rag.example.com`, or `/mcp` refuses requests for that host.
 3. **Pull the image instead of building on the VM.** Replace `build:` with the image the publish workflow pushes to GHCR. Building on a 4 GB VM is slow, because it downloads PyTorch and the models.
-4. **Give shutdown time to finish** with `stop_grace_period: 90s` on `api`. The Docker default of 10 s can cut off an indexing batch. That's recoverable with Run again, but it's avoidable.
+4. **Give the indexing worker shutdown time** with `stop_grace_period: 90s` on `worker` (already set in Compose). The Docker default of 10 s can cut off a batch; RabbitMQ requeues the unacknowledged job, but a graceful stop avoids repeated work.
 5. **Restore a backup once**, so you know it works before you need it.
 
 

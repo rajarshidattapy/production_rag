@@ -288,7 +288,7 @@ class TestPerUserDocuments:
         assert "bluefalcon" in _cited(_ask(alice))
         assert "bluefalcon" not in _cited(_ask(bob))
 
-        api_app._ingest_jobs[job_id]["status"] = "cancelled"
+        api_app._record_ingest_job(job_id, status="cancelled")
         new_id = alice.post(f"/ingest/jobs/{job_id}/retry").json()["job_id"]
         assert _wait(alice, new_id)["chunks_ingested"] == 0  # already stored under the same owner
 

@@ -1,4 +1,19 @@
 services:
+  rabbitmq:
+    image: rabbitmq:4.2.9-alpine
+    container_name: rag-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: rag
+      RABBITMQ_DEFAULT_PASS: rag-local-only
+    # The broker is private to the Compose network; only the API publishes and worker consumes.
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
   redis:
     image: redis:7.2.17-alpine
     container_name: rag-redis
@@ -48,6 +63,7 @@ services:
       - RAG_CHROMA_HOST=chroma
       - RAG_CHROMA_PORT=8000
       - RAG_REDIS_URL=redis://redis:6379/0
+      - RAG_RABBITMQ_URL=${RAG_RABBITMQ_URL:-amqp://rag:rag-local-only@rabbitmq:5672/%2F}
       - RAG_LLM_PROVIDER=${RAG_LLM_PROVIDER:-openai}
       - RAG_LLM_MODEL=${RAG_LLM_MODEL:-gpt-4o-mini}
       - RAG_OPENROUTER_MODE=${RAG_OPENROUTER_MODE:-auto}
@@ -73,6 +89,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8000/healthz || exit 1"]
@@ -80,6 +98,36 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag-index-worker
+    command: ["-m", "src.worker"]
+    environment:
+      - RAG_CHROMA_HOST=chroma
+      - RAG_CHROMA_PORT=8000
+      - RAG_REDIS_URL=redis://redis:6379/0
+      - RAG_RABBITMQ_URL=${RAG_RABBITMQ_URL:-amqp://rag:rag-local-only@rabbitmq:5672/%2F}
+      - RAG_LLM_PROVIDER=${RAG_LLM_PROVIDER:-openai}
+      - RAG_LLM_MODEL=${RAG_LLM_MODEL:-gpt-4o-mini}
+      - RAG_OPENROUTER_MODE=${RAG_OPENROUTER_MODE:-auto}
+      - RAG_REDACT_ANSWERS
+      - RAG_SOURCE_ROLES
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      chroma:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 90s
 
 volumes:
   chroma_data:
