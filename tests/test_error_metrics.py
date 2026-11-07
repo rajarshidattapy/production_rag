@@ -28,6 +28,8 @@ def client() -> TestClient:
 
 
 def _requests(client: TestClient, path: str, status: str) -> float:
+    """Requests to ``path`` that got ``status``, across every method."""
+    total = 0.0
     for family in text_string_to_metric_families(client.get("/metrics").text):
         if family.name == "rag_http_requests":
             for sample in family.samples:
@@ -36,8 +38,8 @@ def _requests(client: TestClient, path: str, status: str) -> float:
                     and sample.labels["path"] == path
                     and sample.labels["status_code"] == status
                 ):
-                    return sample.value
-    return 0.0
+                    total += sample.value
+    return total
 
 
 def _latency_count(client: TestClient, path: str) -> float:

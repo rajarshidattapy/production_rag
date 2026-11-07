@@ -18,3 +18,4 @@ data/chat.db*
 *.log
 .env
 .env.local
+secrets

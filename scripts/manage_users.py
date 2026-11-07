@@ -15,6 +15,7 @@ import getpass
 import sys
 from collections.abc import Sequence
 
+from src import audit
 from src.chat.store import ChatStore, UsernameTakenError
 from src.config import settings
 
@@ -41,19 +42,35 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     store = ChatStore(settings.chat_db_file)
+
+    def done(succeeded: bool) -> None:
+        audit.record(
+            f"admin.user_{args.command.replace('-', '_')}",
+            outcome="success" if succeeded else "failure",
+            actor=audit.cli_actor(),
+            username=args.username,
+        )
+
     if args.command == "list":
         print("\n".join(store.list_usernames()))
     elif args.command == "create":
         try:
-            print(f"Created {store.create_user(args.username, _read_password()).username}")
+            created = store.create_user(args.username, _read_password())
         except UsernameTakenError:
+            done(False)
             sys.exit(f"{args.username} already exists.")
+        done(True)
+        print(f"Created {created.username}")
     elif args.command == "set-password":
-        if not store.set_password(args.username, _read_password()):
+        changed = store.set_password(args.username, _read_password())
+        done(changed)
+        if not changed:
             sys.exit(f"No account named {args.username}.")
         print(f"Password changed for {args.username}")
     elif args.command == "delete":
-        if not store.delete_user(args.username):
+        deleted = store.delete_user(args.username)
+        done(deleted)
+        if not deleted:
             sys.exit(f"No account named {args.username}.")
         print(f"Deleted {args.username} and their chat history")
 

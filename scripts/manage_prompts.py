@@ -18,6 +18,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from src import audit
 from src.config import settings
 from src.prompt_catalog import PROMPT_FIELDS, builtin_prompt_specs, sync_builtin_prompts
 from src.prompt_management import PromptError, PromptStore
@@ -33,6 +34,10 @@ def _time(value: float) -> str:
 
 def _actor(value: str | None) -> str:
     return value or getpass.getuser() or "operator"
+
+
+# Commands that change which prompt the application runs, recorded in the audit log.
+_CHANGES = {"register", "activate", "rollback"}
 
 
 def _spec(name: str):
@@ -54,6 +59,16 @@ def _print_versions(store: PromptStore, name: str | None) -> None:
             f"{version.name:<30} {_short(version.hash):<13} "
             f"{_time(version.created_at):<29} {version.created_by}"
         )
+
+
+def _audit(args: argparse.Namespace, actor: str, outcome: str, **details: object) -> None:
+    audit.record(
+        f"admin.prompt_{args.command}",
+        outcome=outcome,
+        actor=audit.cli_actor(actor),
+        prompt=args.name,
+        **details,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -128,9 +143,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             digest = store.register(args.name, prompt, PROMPT_FIELDS[args.name], actor=actor)
             if args.activate:
                 store.activate(args.name, digest, PROMPT_FIELDS[args.name], actor=actor)
+            _audit(args, actor, "success", version=digest, activate=args.activate)
             print(f"{'Activated' if args.activate else 'Registered'} {args.name} {_short(digest)}")
         elif args.command == "activate":
             digest = store.activate(args.name, args.version, PROMPT_FIELDS[args.name], actor=actor)
+            _audit(args, actor, "success", version=digest)
             print(f"Activated {args.name} {_short(digest)}")
         elif args.command == "rollback":
             digest = store.rollback(
@@ -139,6 +156,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 actor=actor,
                 to_version=args.to_version,
             )
+            _audit(args, actor, "success", version=digest)
             print(f"Rolled back {args.name} to {_short(digest)}")
         elif args.command == "history":
             print("TIME (UTC)                    ACTION      FROM          TO            ACTOR")
@@ -148,6 +166,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                     f"{_short(event.from_hash):<13} {_short(event.to_hash):<13} {event.actor}"
                 )
     except (OSError, UnicodeError, PromptError) as exc:
+        if args.command in _CHANGES:
+            _audit(args, actor, "failure")
         sys.exit(str(exc))
 
 

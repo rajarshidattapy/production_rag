@@ -23,6 +23,7 @@
 - **Run again re-reads every file.** Track finished files by content hash so a resume skips them. *From the code.*
 - **Idempotent Ingestion Jobs:** Prevent duplicate job submissions from creating repeated or inconsistent document indexing operations.
 - **Dead-Letter Job Handling:** Preserve failed ingestion jobs for inspection, diagnosis, and controlled reprocessing.
+- **The audit log doesn't record what the indexing worker does.** The API records each queued, cancelled, and retried job, but the worker's own outcome, including a `reset` that wipes every document, isn't written. Call `audit.record` in `src/worker.py` when a job finishes. *From the code.*
 
 ### Stage 2: Retrieval
 
@@ -94,11 +95,6 @@
 - **Request Cancellation Propagation:** Cancel downstream retrieval, reranking, and LLM operations when the client disconnects or the request times out.
 - **No per-user rate limits or spending caps.** Nothing limits LLM cost on `/query` or MCP's `ask_knowledge_base`, and self-healing can make several LLM calls per question. MCP clients all use the one `RAG_API_KEY`, so one client can't be limited or revoked alone; give each its own key. *From the code.*
 - **Chat and message lists aren't paginated**, so a heavy user gets everything on every load. *From the code.*
-
-**Security**
-
-- **Audit Logging:** Record security-sensitive actions such as uploads, queries, document modifications, deletions, and administrative operations without exposing sensitive content.
-- **Secrets Management:** Store API keys, database credentials, and encryption keys using a dedicated secrets manager instead of relying solely on environment variables.
 
 ### Stage 6: Infrastructure
 

@@ -84,6 +84,10 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
     volumes:
       - ./data:/app/data
+      # Secrets as files, one per variable named in lowercase (openai_api_key, rag_api_key,
+      # rag_rabbitmq_url, ...). A file here wins over the variable above, so production
+      # keeps keys out of .env and `docker inspect`. Owner uid 1001, mode 600.
+      - ./secrets:/run/secrets:ro
     depends_on:
       chroma:
         condition: service_healthy
@@ -121,6 +125,7 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
     volumes:
       - ./data:/app/data
+      - ./secrets:/run/secrets:ro
     depends_on:
       chroma:
         condition: service_healthy

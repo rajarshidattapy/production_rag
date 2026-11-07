@@ -24,6 +24,7 @@ from src.config import settings
 from src.evaluation.dataset import GoldenDataset
 from src.evaluation.runner import EvaluationFailed, EvaluationRunner
 from src.pipeline import RAGPipeline
+from src.secret_files import secret_value
 
 logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),
@@ -95,8 +96,9 @@ def main() -> None:
     # Check for required API keys before instantiating the pipeline
     provider = args.provider or settings.llm_provider
     key_name = "OPENAI_API_KEY" if provider == "openai" else "ANTHROPIC_API_KEY"
-    if not os.environ.get(key_name):
-        print(f"WARNING: Environment variable {key_name} is not set.")
+    configured = settings.openai_api_key if provider == "openai" else settings.anthropic_api_key
+    if not secret_value(key_name, configured):
+        print(f"WARNING: {key_name} is not set, in a secret file or the environment.")
         if os.environ.get("GITHUB_ACTIONS") == "true":
             print(
                 "Running in CI context. Skipping evaluation because API keys are not available (e.g. pull request from fork)."

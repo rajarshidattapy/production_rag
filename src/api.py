@@ -10,6 +10,7 @@ Run locally with:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -38,6 +39,7 @@ from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.routing import Route
 
+from src import audit
 from src.chat.store import AccountLockedError, ChatStore, User, UsernameTakenError
 from src.config import settings as _settings
 from src.generation.citations import CitationFormatter
@@ -55,7 +57,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Optional API key authentication
 # ---------------------------------------------------------------------------
-_RAG_API_KEY = os.environ.get("RAG_API_KEY", "").strip()
+_RAG_API_KEY = (_settings.api_key or "").strip()
 
 
 def _check_api_key(authorization: str | None = Header(None)) -> None:
@@ -63,12 +65,14 @@ def _check_api_key(authorization: str | None = Header(None)) -> None:
     if not _RAG_API_KEY:
         return  # Auth disabled — no key configured
     if not authorization or not authorization.startswith("Bearer "):
+        audit.note(denied_by="missing_api_key")
         raise HTTPException(status_code=401, detail="Missing or malformed Authorization header.")
     token = authorization[len("Bearer ") :]
     # Constant-time comparison — a naive `!=` short-circuits on the first
     # mismatched byte, leaking a timing side-channel that lets a remote
     # attacker recover the key byte-by-byte across many requests.
     if not secrets.compare_digest(token, _RAG_API_KEY):
+        audit.note(denied_by="invalid_api_key")
         raise HTTPException(status_code=403, detail="Invalid API key.")
 
 
@@ -291,6 +295,8 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["Accept", "Accept-Language", "Content-Type"],
 )
+# Added last, so it wraps the others and sees the X-Request-ID they set.
+app.add_middleware(audit.AuditMiddleware)
 
 
 @app.exception_handler(VectorStoreUnavailableError)
@@ -718,6 +724,14 @@ def _resolve_ingest_source(source: str) -> Path:
     return source_path
 
 
+def _audit_source(source_path: Path) -> str:
+    """An ingest source as the audit log records it: relative to the data directory."""
+    try:
+        return str(source_path.relative_to(Path(_settings.data_dir).resolve()))
+    except ValueError:
+        return source_path.name
+
+
 @app.post("/upload", response_model=UploadResponse, dependencies=[_auth])
 async def upload_pdf(
     request: Request,
@@ -758,6 +772,8 @@ async def upload_pdf(
     upload_dir.mkdir(parents=True, exist_ok=True)
     destination = upload_dir / f"{uuid.uuid4().hex}_{safe_name}"
     await asyncio.to_thread(destination.write_bytes, content)
+    digest = await asyncio.to_thread(hashlib.sha256, content)
+    audit.note(filename=safe_name, size_bytes=len(content), sha256=digest.hexdigest(), batch=batch)
     return UploadResponse(
         filename=safe_name,
         source=str(destination),
@@ -779,6 +795,7 @@ async def ingest(request: IngestRequest, rag_session: str | None = Cookie(None))
     pipeline = get_pipeline()
     user = await asyncio.to_thread(_user_for_session, rag_session)
 
+    audit.note(source=_audit_source(source_path), reset=request.reset)
     if request.reset:
         await asyncio.to_thread(pipeline.reset)
 
@@ -789,6 +806,7 @@ async def ingest(request: IngestRequest, rag_session: str | None = Cookie(None))
     except (ValueError, OSError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    audit.note(chunks_ingested=chunks_ingested)
     stats = await asyncio.to_thread(pipeline.stats)
     total_chunks = stats["chunks_in_store"]
     return IngestResponse(chunks_ingested=chunks_ingested, total_chunks=total_chunks)
@@ -971,7 +989,9 @@ def _enqueue_ingest_job(source_path: Path, reset: bool = False, **fields: Any) -
 
 
 def _user_for_session(rag_session: str | None) -> User | None:
-    return get_chat_store().user_for_session(rag_session) if rag_session else None
+    user = get_chat_store().user_for_session(rag_session) if rag_session else None
+    audit.note_user(user)
+    return user
 
 
 def _job_for_requester(job_id: str, rag_session: str | None) -> dict[str, Any]:
@@ -1017,6 +1037,7 @@ async def ingest_async(
         user_id=user.id if user else None,
         chat_id=request.chat_id,
     )
+    audit.note(source=_audit_source(source_path), reset=request.reset, job_id=job_id)
     return IngestJobResponse(job_id=job_id, status="pending")
 
 
@@ -1062,6 +1083,7 @@ def retry_ingest_job(job_id: str, rag_session: str | None = Cookie(None)) -> Ing
         # interrupted attempt recorded nothing, so what it was going to replace passes along.
         replaces_chat_files=job.get("chat_files") or job.get("replaces_chat_files"),
     )
+    audit.note(new_job_id=new_id)
     return IngestJobResponse(job_id=new_id, status="pending")
 
 
@@ -1082,6 +1104,7 @@ async def query(
     """
     from src.utils.usage import UsageTracker, request_usage
 
+    audit.note(question_chars=len(request.question), self_heal=_healing_requested(request))
     tracker = UsageTracker()
     token = request_usage.set(tracker)
     owners_token = retrieval_owners.set(await asyncio.to_thread(_visible_owners, rag_session))
@@ -1184,6 +1207,7 @@ def _current_user(rag_session: str | None = Cookie(None)) -> User:
     user = get_chat_store().user_for_session(rag_session) if rag_session else None
     if user is None:
         raise HTTPException(status_code=401, detail="Please sign in.")
+    audit.note_user(user)
     return user
 
 
@@ -1298,10 +1322,12 @@ def register(body: RegisterRequest, request: Request, response: Response) -> Acc
     address = _client_address(request)
     _refuse_if_too_many_attempts(address)
     _auth_limiter.record(address)
+    audit.note(username=body.username)
     try:
         user = get_chat_store().create_user(body.username, body.password)
     except UsernameTakenError:
         raise HTTPException(status_code=409, detail="That username is taken.") from None
+    audit.note_user(user)
     _start_session(user, request, response)
     return AccountResponse(username=user.username)
 
@@ -1310,6 +1336,8 @@ def register(body: RegisterRequest, request: Request, response: Response) -> Acc
 def login(body: LoginRequest, request: Request, response: Response) -> AccountResponse:
     """Sign in. Repeated failures block the account and the address for a few minutes."""
     address = _client_address(request)
+    # The name tried, so repeated failures against one account show up. Never the password.
+    audit.note(username=body.username)
     _refuse_if_too_many_attempts(address)
     try:
         user = get_chat_store().authenticate(body.username, body.password)
@@ -1321,6 +1349,7 @@ def login(body: LoginRequest, request: Request, response: Response) -> AccountRe
     if user is None:
         _auth_limiter.record(address)
         raise HTTPException(status_code=401, detail="Wrong username or password.")
+    audit.note_user(user)
     _start_session(user, request, response)
     return AccountResponse(username=user.username)
 
@@ -1329,6 +1358,7 @@ def login(body: LoginRequest, request: Request, response: Response) -> AccountRe
 def logout(response: Response, rag_session: str | None = Cookie(None)) -> None:
     """End this session on the server, not just in this browser."""
     if rag_session:
+        _user_for_session(rag_session)  # who is signing out, for the audit log
         get_chat_store().delete_session(rag_session)
     response.delete_cookie(_SESSION_COOKIE)
 
@@ -1360,6 +1390,7 @@ def create_chat(body: ChatCreateRequest, user: User = _signed_in) -> dict[str, A
 @app.post("/chats/import", response_model=ChatImportResponse, dependencies=[_auth])
 def import_chat(body: ChatImportRequest, user: User = _signed_in) -> ChatImportResponse:
     """Copy in a chat saved elsewhere. Sending the same ``import_id`` again changes nothing."""
+    audit.note(import_id=body.import_id, messages=len(body.messages))
     imported = get_chat_store().import_chat(
         user.id,
         body.import_id,
@@ -1399,6 +1430,7 @@ def delete_chat(chat_id: str, user: User = _signed_in) -> None:
 )
 def add_chat_files(chat_id: str, body: ChatFilesRequest, user: User = _signed_in) -> dict[str, Any]:
     """Record documents that were ingested for this chat."""
+    audit.note(files=len(body.filenames))
     chat = get_chat_store().add_files(user.id, chat_id, body.filenames)
     if chat is None:
         raise HTTPException(status_code=404, detail="No chat found with that ID.")
@@ -1510,6 +1542,7 @@ async def query_stream(
              -H 'Content-Type: application/json' \\
              -d '{"question": "What is RAG?", "use_hybrid": true}'
     """
+    audit.note(question_chars=len(request.question), self_heal=_healing_requested(request))
     pipeline = get_pipeline()
     timeout = _query_timeout()
     owners = await asyncio.to_thread(_visible_owners, rag_session)

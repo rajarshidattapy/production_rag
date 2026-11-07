@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Literal
 
-from src.generation.llm_client import LLMClient
+from src.generation.llm_client import LLMClient, anthropic_client_kwargs
 from src.prompt_catalog import CONDENSE_SYSTEM, DEFAULT_SYSTEM, resolve_builtin
 from src.utils.i18n import _
 
@@ -189,7 +189,7 @@ class Generator:
                 "anthropic package required. Install with: pip install anthropic"
             ) from None
 
-        client = anthropic.AsyncAnthropic(timeout=self._client.timeout)
+        client = anthropic.AsyncAnthropic(timeout=self._client.timeout, **anthropic_client_kwargs())
         async with client.messages.stream(
             model=self.model,
             max_tokens=self.max_tokens,

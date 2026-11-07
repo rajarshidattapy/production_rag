@@ -1,5 +1,7 @@
 # Environment
 .env
+# Secret files mounted into containers at /run/secrets
+secrets/
 *.env.local
 
 # Python

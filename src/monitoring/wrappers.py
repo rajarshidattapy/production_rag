@@ -932,7 +932,9 @@ class MonitoredRAGPipeline:
             elif prov == "anthropic":
                 from anthropic import Anthropic
 
-                anthropic_client = Anthropic(timeout=60.0)
+                from src.generation.llm_client import anthropic_client_kwargs
+
+                anthropic_client = Anthropic(timeout=60.0, **anthropic_client_kwargs())
                 with anthropic_client.messages.stream(
                     model=mdl,
                     max_tokens=getattr(self_gen, "max_tokens", 1024),

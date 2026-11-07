@@ -6,16 +6,22 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, StringConstraints
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+
+from src.secret_files import SecretFilesSource
 
 # Collection and role names: lowercase, so "HR" and "hr" can't become two different roles.
 AccessName = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9_.-]{0,63}$")]
+
+# Read from a secrets manager's files first (see src/secret_files.py), then the environment.
+SECRET_FIELDS = ("openai_api_key", "anthropic_api_key", "api_key", "redis_url", "rabbitmq_url")
 
 
 class Settings(BaseSettings):
     """Central configuration for the RAG pipeline.
 
-    All values can be overridden via environment variables or a .env file.
+    All values can be overridden via environment variables or a .env file. Secrets in
+    SECRET_FIELDS can also come from files, which take precedence over both.
     """
 
     model_config = SettingsConfigDict(
@@ -99,6 +105,9 @@ class Settings(BaseSettings):
     # Deliberately uses the conventional, un-prefixed variable so the OpenAI
     # SDK and other tooling can share the same .env file.
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY", repr=False)
+    anthropic_api_key: str | None = Field(
+        default=None, validation_alias="ANTHROPIC_API_KEY", repr=False
+    )
     openrouter_mode: str = "auto"
     llm_provider: Literal["openai", "anthropic"] = "openai"
     llm_model: str = "gpt-4o-mini"
@@ -198,9 +207,28 @@ class Settings(BaseSettings):
 
     # ---------- Logging ----------
     log_level: str = "INFO"
+    # One JSON line per security-sensitive action (sign-ins, uploads, ingests, queries,
+    # deletions, admin commands): who, what, and the outcome, never the text involved.
+    audit_log_enabled: bool = True
+    # Defaults to <data_dir>/audit.log. "-" writes to standard output for a log shipper.
+    audit_log_path: Path | None = None
 
     # ---------- API / CLI ----------
+    # Requires "Authorization: Bearer <key>" on every route except /healthz when set.
+    api_key: str | None = Field(default=None, repr=False)
     api_url: str = "http://localhost:8000"
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        secret_files = SecretFilesSource(settings_cls, SECRET_FIELDS)
+        return init_settings, secret_files, env_settings, dotenv_settings, file_secret_settings
 
     @property
     def chat_db_file(self) -> Path:
@@ -209,6 +237,10 @@ class Settings(BaseSettings):
     @property
     def prompt_db_file(self) -> Path:
         return self.prompt_db_path or self.data_dir / "prompts.db"
+
+    @property
+    def audit_log_file(self) -> Path:
+        return self.audit_log_path or self.data_dir / "audit.log"
 
 
 settings = Settings()

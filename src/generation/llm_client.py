@@ -10,21 +10,27 @@ from __future__ import annotations
 import os
 from typing import Any, Literal
 
+from src.secret_files import secret_value
 from src.utils.retry import async_retry_with_backoff, retry_with_backoff
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 
 def _openai_api_key() -> str:
-    """Get the key from the process environment or the application's .env file."""
-    if key := os.getenv("OPENAI_API_KEY"):
-        return key
-
+    """Get the key from a secret file, the process environment, or the application's .env."""
     # Settings reads .env itself.  Import lazily to keep this client usable in
     # small scripts that do not otherwise need the application configuration.
     from src.config import settings
 
-    return settings.openai_api_key or ""
+    return secret_value("OPENAI_API_KEY", settings.openai_api_key) or ""
+
+
+def anthropic_client_kwargs() -> dict[str, Any]:
+    """The Anthropic key, when one is configured. Otherwise the SDK reads its own variable."""
+    from src.config import settings
+
+    key = secret_value("ANTHROPIC_API_KEY", settings.anthropic_api_key)
+    return {"api_key": key} if key else {}
 
 
 def _openrouter_mode() -> str:
@@ -205,7 +211,9 @@ class LLMClient:
                 "anthropic package required. Install with: pip install anthropic"
             ) from None
 
-        client = anthropic.Anthropic(timeout=self.timeout, max_retries=0)
+        client = anthropic.Anthropic(
+            timeout=self.timeout, max_retries=0, **anthropic_client_kwargs()
+        )
 
         def _api_call():
             if system:
@@ -287,7 +295,9 @@ class LLMClient:
                 "anthropic package required. Install with: pip install anthropic"
             ) from None
 
-        client = anthropic.AsyncAnthropic(timeout=self.timeout, max_retries=0)
+        client = anthropic.AsyncAnthropic(
+            timeout=self.timeout, max_retries=0, **anthropic_client_kwargs()
+        )
 
         async def _api_call():
             if system:

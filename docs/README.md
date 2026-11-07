@@ -318,6 +318,8 @@ Citation support is a word-overlap heuristic, so it can catch a misattributed ci
 - **Background Ingestion** — `POST /ingest/async` queues a job and returns a `job_id` immediately (202). Jobs stream through a collection a batch at a time, report progress and per-file failures, and can be cancelled or resumed. The UI shows them live. See [Background indexing](#background-indexing).
 - **LLM Backends** — OpenAI or Anthropic via `RAG_LLM_PROVIDER`, chosen at startup, with streaming for both. Provider-qualified model names or an `sk-or-` key route the OpenAI client to OpenRouter (`RAG_OPENROUTER_MODE` overrides this).
 - **Optional API Key Auth** — Set `RAG_API_KEY` to require `Authorization: Bearer <key>` on every route except `/healthz` and the UI page. Auth is off when the variable is unset, which is the default.
+- **Audit Log** — Sign-ins, uploads, ingests, queries, passage reads, chat deletions, refused API keys, and the `manage_users` and `manage_prompts` commands each write one JSON line to `data/audit.log` (or standard output): who, from where, what, and the outcome. It records sizes, IDs, and a SHA-256 of each upload, never document text, questions, answers, or passwords.
+- **Secrets from Files** — API keys and credential-bearing URLs are read first from files a secrets manager mounts (Docker or Kubernetes secrets, Vault Agent, cloud secrets-store CSI drivers): `<NAME>_FILE`, else `<name>` in `RAG_SECRETS_DIR` (`/run/secrets`). Compose mounts `./secrets` there, and a file wins over the environment variable.
 - **Prometheus Metrics and Dashboard** — `/metrics` exposes per-route request counts and latency plus self-healing counters. The UI's Observability button shows them as a dashboard.
 - **OpenTelemetry and Langfuse Instrumentation (opt-in)** — With `MONITOR_ENABLED=true`, the HTTP service runs through `MonitoredRAGPipeline`, which traces ingest, retrieve, rerank, generate, and each healing step, with token and cost attribution and a circuit breaker. See [Monitoring & Observability](#monitoring--observability).
 - **Runtime Prompt Rollback** — The answering, condensation, verifier, rewrite, and repair prompts are stored as immutable SHA-256 versions in SQLite. Operators can validate and activate a new version or atomically restore the previously active one without restarting or redeploying the API; every activation is audited.
@@ -585,6 +587,9 @@ All settings use the `RAG_` prefix and can be set via `.env` or environment vari
 | `RAG_FAITHFULNESS_THRESHOLD`     | `0.7`                                  | Minimum faithfulness score for CI gate                      |
 | `RAG_CORS_ORIGINS`               | `*`                                    | Comma-separated allowed CORS origins                        |
 | `RAG_API_KEY`                    | *(unset)*                              | Bearer token for API auth (disabled when unset)             |
+| `RAG_SECRETS_DIR`                | `/run/secrets`                         | Folder of secret files; process environment only, not `.env` |
+| `RAG_AUDIT_LOG_ENABLED`          | `true`                                 | Write the audit log                                         |
+| `RAG_AUDIT_LOG_PATH`             | `<RAG_DATA_DIR>/audit.log`             | Audit log file; `-` for standard output                     |
 | `RAG_CHAT_DB_PATH`               | `<RAG_DATA_DIR>/chat.db`               | SQLite file for accounts and chats; use a local disk        |
 | `RAG_PROMPT_DB_PATH`             | `<RAG_DATA_DIR>/prompts.db`             | SQLite prompt versions, active pointers, and audit history  |
 | `RAG_ALLOW_SIGNUP`               | `true`                                 | Let anyone who can reach the server register                |

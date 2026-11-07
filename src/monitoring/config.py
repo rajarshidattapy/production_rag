@@ -6,7 +6,9 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
+
+from src.secret_files import SecretFilesSource
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,21 @@ class MonitoringSettings(BaseSettings):
     otel_export_interval_ms: int = 10000
     otel_export_timeout_ms: int = 5000
     max_queue_size: int = 10000
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        # The Langfuse keys can come from a secrets manager's files, like src/config.py's.
+        secret_files = SecretFilesSource(
+            settings_cls, ("langfuse_secret_key", "langfuse_public_key")
+        )
+        return init_settings, secret_files, env_settings, dotenv_settings, file_secret_settings
 
     @field_validator("langfuse_secret_key", "langfuse_public_key", mode="before")
     @classmethod
