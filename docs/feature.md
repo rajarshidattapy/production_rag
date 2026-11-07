@@ -19,7 +19,7 @@
 
 - **Embedding is the bottleneck.** PyTorch is pinned to one thread, so a million chunks would take about 70 hours. Use a GPU or more threads for the indexing worker. *Measured at about 4 chunks per second; the 70 hours is extrapolated.*
 - **Batch size needs revisiting with faster embedding.** Small batches add overhead that the slow CPU model hides. *Measured: 551 s vs 360 s for 40,000 chunks with stub embeddings.*
-- **Indexing runs inside the API process.** It competes with queries for CPU, a deploy interrupts it, and each replica has its own queue, where one big job makes everyone else's wait. Needs a separate worker service with a shared queue and per-user fairness. *From the code.*
+- **Indexing runs inside the API process by default.** That broker-free one-thread queue is appropriate for one process; replicas can now opt into one shared Celery queue and a separate single-concurrency worker. The remaining scale work is per-user fairness and moving job status out of the shared JSON file before running across hosts. *From the code.*
 - **Run again re-reads every file.** Track finished files by content hash so a resume skips them. *From the code.*
 - **Idempotent Ingestion Jobs:** Prevent duplicate job submissions from creating repeated or inconsistent document indexing operations.
 - **Dead-Letter Job Handling:** Preserve failed ingestion jobs for inspection, diagnosis, and controlled reprocessing.

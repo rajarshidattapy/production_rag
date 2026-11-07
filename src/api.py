@@ -28,6 +28,7 @@ from typing import Any, Literal
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from filelock import FileLock, Timeout
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
@@ -130,7 +131,10 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         async with _serve_mcp():
             yield
     finally:
-        _interrupt_active_ingest_jobs()
+        # Celery workers have their own lifecycle. Stopping an API replica must not cancel a
+        # job that is running safely outside it.
+        if _settings.ingest_queue == "local":
+            _interrupt_active_ingest_jobs()
         close_redis_clients()
 
 
@@ -809,7 +813,6 @@ _active_ingest_jobs: dict[str, threading.Event] = {}
 _ingest_jobs_shut_down: set[str] = set()
 # Identifies this process, so a job left unfinished by a previous one can be recognised.
 _INSTANCE_ID = uuid.uuid4().hex
-_ingest_jobs_file_lock = threading.Lock()
 _ingest_jobs_lock = threading.RLock()
 # Rewriting the status file on every batch would add up on a long job.
 _INGEST_PROGRESS_SAVE_SECONDS = 2.0
@@ -822,6 +825,12 @@ _UPLOAD_PREFIX_RE = re.compile(r"^[0-9a-f]{32}_")
 
 def _ingest_jobs_path() -> Path:
     return Path(_settings.data_dir) / "ingest_jobs.json"
+
+
+def _ingest_jobs_file_lock() -> FileLock:
+    """Inter-process lock for API replicas and the Celery worker's shared status file."""
+    path = _ingest_jobs_path()
+    return FileLock(path.with_suffix(f"{path.suffix}.lock"), timeout=10)
 
 
 def _read_persisted_ingest_jobs() -> dict[str, dict[str, Any]]:
@@ -838,24 +847,35 @@ def _persist_ingest_job(job_id: str, record: dict[str, Any]) -> None:
     path = _ingest_jobs_path()
     tmp = path.with_name(f"{path.name}.{_INSTANCE_ID}.tmp")
     try:
-        with _ingest_jobs_file_lock:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _ingest_jobs_file_lock():
             jobs = _read_persisted_ingest_jobs()
+            # Cancellation is a sticky request. A worker progress save racing the API must
+            # not clear it and let indexing carry on.
+            if jobs.get(job_id, {}).get("cancel_requested"):
+                record = {**record, "cancel_requested": True}
             jobs.pop(job_id, None)
             jobs[job_id] = record
             for old_id in list(jobs)[: max(0, len(jobs) - _INGEST_JOBS_MAX)]:
                 del jobs[old_id]
-            path.parent.mkdir(parents=True, exist_ok=True)
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(jobs, f)
             os.replace(tmp, path)
-    except OSError as exc:
+    except (OSError, Timeout) as exc:
         logger.warning("Could not save ingest job status: %s", exc)
 
 
 def _record_ingest_job(job_id: str, *, persist: bool = True, **fields: Any) -> None:
+    persisted = _read_persisted_ingest_jobs().get(job_id) if _celery_ingest_enabled() else None
     with _ingest_jobs_lock:
-        _ingest_jobs[job_id] = {**_ingest_jobs.get(job_id, {}), **fields, "owner": _INSTANCE_ID}
+        current = _latest_ingest_job(_ingest_jobs.get(job_id), persisted) or {}
+        _ingest_jobs[job_id] = {
+            **current,
+            **fields,
+            "owner": _INSTANCE_ID,
+            "updated_at": time.time(),
+        }
         _ingest_jobs.move_to_end(job_id)
         while len(_ingest_jobs) > _INGEST_JOBS_MAX:
             _ingest_jobs.popitem(last=False)
@@ -864,22 +884,38 @@ def _record_ingest_job(job_id: str, *, persist: bool = True, **fields: Any) -> N
         _persist_ingest_job(job_id, record)
 
 
+def _latest_ingest_job(
+    in_memory: dict[str, Any] | None, persisted: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """Choose the newest copy when the API and Celery worker are separate processes."""
+    if in_memory is None or persisted is None:
+        return in_memory or persisted
+    if not _celery_ingest_enabled():
+        return in_memory
+    return max((in_memory, persisted), key=lambda job: job.get("updated_at") or 0)
+
+
 def _find_ingest_job(job_id: str) -> dict[str, Any] | None:
     with _ingest_jobs_lock:
         job = _ingest_jobs.get(job_id)
-    return job or _read_persisted_ingest_jobs().get(job_id)
+    return _latest_ingest_job(job, _read_persisted_ingest_jobs().get(job_id))
 
 
 def _ingest_job_view(job_id: str, job: dict[str, Any]) -> IngestJobStatusResponse:
     """A job as clients see it: internal fields dropped, and orphaned work called what it is."""
-    if job.get("status") in _UNFINISHED_JOB_STATUSES and job.get("owner") != _INSTANCE_ID:
+    if (
+        not _celery_ingest_enabled()
+        and job.get("status") in _UNFINISHED_JOB_STATUSES
+        and job.get("owner") != _INSTANCE_ID
+    ):
         job = {
             **job,
             "status": "interrupted",
             "error": "The server restarted before this job finished.",
         }
     return IngestJobStatusResponse(
-        job_id=job_id, **{k: v for k, v in job.items() if k not in ("owner", "user_id", "source")}
+        job_id=job_id,
+        **{k: v for k, v in job.items() if k not in ("owner", "user_id", "source", "updated_at")},
     )
 
 
@@ -935,9 +971,12 @@ def _note_ingest_result_in_chat(job_id: str, status: str, progress: IngestProgre
 
 
 def _run_ingest_job(job_id: str, source_path: Path, reset: bool, owner: str | None) -> None:
-    stop = _active_ingest_jobs[job_id]
+    stop = _active_ingest_jobs.setdefault(job_id, threading.Event())
     latest = IngestProgress()
     last_saved = 0.0
+
+    def should_stop() -> bool:
+        return stop.is_set() or _persisted_cancel_requested(job_id)
 
     def on_progress(progress: IngestProgress) -> None:
         nonlocal latest, last_saved
@@ -952,7 +991,7 @@ def _run_ingest_job(job_id: str, source_path: Path, reset: bool, owner: str | No
         return "interrupted" if job_id in _ingest_jobs_shut_down else "cancelled"
 
     try:
-        if stop.is_set():  # cancelled while waiting its turn
+        if should_stop():  # cancelled while waiting its turn
             status = stopped_status()
             _note_ingest_result_in_chat(job_id, status, latest)
             _record_ingest_job(job_id, status=status)
@@ -963,7 +1002,7 @@ def _run_ingest_job(job_id: str, source_path: Path, reset: bool, owner: str | No
         if reset:
             pipeline.reset()
         chunks_ingested = pipeline.ingest(
-            source_path, on_progress=on_progress, should_stop=stop.is_set, owner=owner
+            source_path, on_progress=on_progress, should_stop=should_stop, owner=owner
         )
         total_chunks = pipeline.stats()["chunks_in_store"]
         status = stopped_status() if latest.stopped else "completed"
@@ -984,13 +1023,52 @@ def _run_ingest_job(job_id: str, source_path: Path, reset: bool, owner: str | No
         _ingest_jobs_shut_down.discard(job_id)
 
 
+def _celery_ingest_enabled() -> bool:
+    return _settings.ingest_queue == "celery"
+
+
+def _persisted_cancel_requested(job_id: str) -> bool:
+    if not _celery_ingest_enabled():
+        return False
+    job = _read_persisted_ingest_jobs().get(job_id)
+    return bool(job and job.get("cancel_requested"))
+
+
+def _run_queued_ingest_job(message: dict[str, Any]) -> str:
+    """Restore a broker-delivered job in this worker, then run it."""
+    job_id = message["job_id"]
+    record = message["record"]
+    persisted = _read_persisted_ingest_jobs().get(job_id) or {}
+    if persisted.get("status") in {"completed", "cancelled", "failed"}:
+        return str(persisted["status"])
+    _record_ingest_job(job_id, persist=False, **{**record, **persisted})
+    try:
+        source_path = _resolve_ingest_source(record["source"])
+    except HTTPException as exc:
+        _record_ingest_job(job_id, status="failed", error=str(exc.detail))
+        return "failed"
+    _run_ingest_job(job_id, source_path, message["reset"], record.get("user_id"))
+    return str((_find_ingest_job(job_id) or {}).get("status", "failed"))
+
+
 def _enqueue_ingest_job(source_path: Path, reset: bool = False, **fields: Any) -> str:
     job_id = str(uuid.uuid4())
-    _active_ingest_jobs[job_id] = threading.Event()
-    _record_ingest_job(
-        job_id, status="pending", source=str(source_path), created_at=time.time(), **fields
-    )
-    _ingest_worker.submit(_run_ingest_job, job_id, source_path, reset, fields.get("user_id"))
+    record = {"status": "pending", "source": str(source_path), "created_at": time.time(), **fields}
+    _record_ingest_job(job_id, **record)
+    if _celery_ingest_enabled():
+        from src.celery_app import CeleryQueueUnavailableError, submit_ingest_job
+
+        try:
+            submit_ingest_job({"job_id": job_id, "reset": reset, "record": record})
+        except CeleryQueueUnavailableError as exc:
+            logger.warning("Could not queue ingest job %s: %s", job_id, exc)
+            _record_ingest_job(job_id, status="failed", error="The job queue is unavailable.")
+            raise HTTPException(
+                status_code=503, detail="The job queue is unavailable. Try again shortly."
+            ) from exc
+    else:
+        _active_ingest_jobs[job_id] = threading.Event()
+        _ingest_worker.submit(_run_ingest_job, job_id, source_path, reset, fields.get("user_id"))
     return job_id
 
 
@@ -1067,10 +1145,13 @@ def cancel_ingest_job(
     """Stop a job after its current batch. Text already indexed stays searchable."""
     job = _job_for_requester(job_id, rag_session)
     stop = _active_ingest_jobs.get(job_id)
-    if stop is None or job.get("status") not in _UNFINISHED_JOB_STATUSES:
+    if job.get("status") not in _UNFINISHED_JOB_STATUSES or (
+        not _celery_ingest_enabled() and stop is None
+    ):
         raise HTTPException(status_code=409, detail="This job is not running on this server.")
-    stop.set()
     _record_ingest_job(job_id, cancel_requested=True)
+    if stop is not None:
+        stop.set()
     return _ingest_job_view(job_id, {**job, "cancel_requested": True})
 
 
@@ -1373,9 +1454,18 @@ def me(user: User = _signed_in) -> AccountResponse:
 @app.get("/ingest/jobs", response_model=list[IngestJobStatusResponse], dependencies=[_auth])
 def list_ingest_jobs(user: User = _signed_in) -> list[IngestJobStatusResponse]:
     """List your most recent ingest jobs, newest first, including any cut off by a restart."""
+    persisted = _read_persisted_ingest_jobs()
     with _ingest_jobs_lock:
-        jobs = {**_read_persisted_ingest_jobs(), **_ingest_jobs}
-    mine = [(i, j) for i, j in jobs.items() if j.get("user_id") == user.id]
+        in_memory = dict(_ingest_jobs)
+    jobs = {
+        job_id: _latest_ingest_job(in_memory.get(job_id), persisted.get(job_id))
+        for job_id in {**persisted, **in_memory}
+    }
+    mine = [
+        (job_id, job)
+        for job_id, job in jobs.items()
+        if job is not None and job.get("user_id") == user.id
+    ]
     mine.sort(key=lambda item: item[1].get("created_at") or 0, reverse=True)
     return [_ingest_job_view(i, j) for i, j in mine[:50]]
 

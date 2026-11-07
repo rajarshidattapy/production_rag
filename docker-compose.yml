@@ -11,6 +11,22 @@ services:
       timeout: 5s
       retries: 5
 
+  # Celery is deliberately opt-in. The default single-API deployment uses no broker; start
+  # this durable broker and the worker with `docker compose --profile celery up` only when
+  # API replicas need to share indexing jobs.
+  celery-broker:
+    profiles: ["celery"]
+    image: redis:7.2.17-alpine
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy noeviction
+    volumes:
+      - celery_broker_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   chroma:
     image: chromadb/chroma:1.5.9
     container_name: rag-chromadb
@@ -48,6 +64,10 @@ services:
       - RAG_CHROMA_HOST=chroma
       - RAG_CHROMA_PORT=8000
       - RAG_REDIS_URL=redis://redis:6379/0
+      - RAG_INGEST_QUEUE=${RAG_INGEST_QUEUE:-local}
+      - RAG_CELERY_BROKER_URL=${RAG_CELERY_BROKER_URL:-redis://celery-broker:6379/0}
+      - RAG_CELERY_TASK_QUEUE=${RAG_CELERY_TASK_QUEUE:-rag-ingest}
+      - RAG_CELERY_VISIBILITY_TIMEOUT_SECONDS=${RAG_CELERY_VISIBILITY_TIMEOUT_SECONDS:-259200}
       - RAG_LLM_PROVIDER=${RAG_LLM_PROVIDER:-openai}
       - RAG_LLM_MODEL=${RAG_LLM_MODEL:-gpt-4o-mini}
       - RAG_OPENROUTER_MODE=${RAG_OPENROUTER_MODE:-auto}
@@ -81,5 +101,54 @@ services:
       retries: 3
       start_period: 30s
 
+  ingest-worker:
+    profiles: ["celery"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - -m
+      - celery
+      - --app=src.celery_app:celery_app
+      - worker
+      - --loglevel=INFO
+      - --concurrency=1
+    environment:
+      - RAG_DATA_DIR=/app/data
+      - RAG_CHROMA_HOST=chroma
+      - RAG_CHROMA_PORT=8000
+      - RAG_REDIS_URL=redis://redis:6379/0
+      - RAG_INGEST_QUEUE=celery
+      - RAG_CELERY_BROKER_URL=${RAG_CELERY_BROKER_URL:-redis://celery-broker:6379/0}
+      - RAG_CELERY_TASK_QUEUE=${RAG_CELERY_TASK_QUEUE:-rag-ingest}
+      - RAG_CELERY_VISIBILITY_TIMEOUT_SECONDS=${RAG_CELERY_VISIBILITY_TIMEOUT_SECONDS:-259200}
+      - RAG_EMBEDDING_MODEL=${RAG_EMBEDDING_MODEL:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
+      - RAG_CHUNK_SIZE=${RAG_CHUNK_SIZE:-800}
+      - RAG_CHUNK_OVERLAP=${RAG_CHUNK_OVERLAP:-150}
+      - RAG_INGEST_BATCH_SIZE=${RAG_INGEST_BATCH_SIZE:-2000}
+      - RAG_MAX_FILE_SIZE_MB=${RAG_MAX_FILE_SIZE_MB:-50}
+      - RAG_MAX_PDF_PAGES=${RAG_MAX_PDF_PAGES:-1000}
+      - RAG_SEMANTIC_DEDUPLICATION=${RAG_SEMANTIC_DEDUPLICATION:-true}
+      - RAG_SEMANTIC_DEDUPLICATION_THRESHOLD=${RAG_SEMANTIC_DEDUPLICATION_THRESHOLD:-0.985}
+      - RAG_REDACT_CREDENTIALS=${RAG_REDACT_CREDENTIALS:-true}
+      - RAG_PII_MODE=${RAG_PII_MODE:-flag}
+      - RAG_INJECTION_MODE=${RAG_INJECTION_MODE:-flag}
+      - RAG_INJECTION_TRUSTED_AUTHORITY
+      - RAG_SOURCE_AUTHORITY
+      - RAG_SOURCE_COLLECTIONS
+      - RAG_SOURCE_ROLES
+    volumes:
+      # API replicas and the worker must see the same sources, job state, and chat database.
+      - ./data:/app/data
+    depends_on:
+      chroma:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      celery-broker:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   chroma_data:
+  celery_broker_data:

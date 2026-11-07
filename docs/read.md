@@ -7,10 +7,6 @@
 # Haven't scaled yet:
 
 1. **RabbitMQ:** background jobs run in a one-worker queue inside the API process, so it's only worth adding once indexing moves to separate worker services.
-2. Celery: Indexing is the only long-running job, and a one-worker thread queue handles it for now, so Celery's broker and separate workers aren't worth adding until we run replicas.
-
-
-
 ## Optimizing for 20 million docs:
 
 but can't sent to LLM: (cost, latency) - knowledge graph
