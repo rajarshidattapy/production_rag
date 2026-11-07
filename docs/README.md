@@ -725,6 +725,21 @@ docker compose up --build
 
 This starts the API and a private Chroma server. For agent deployments, expose the service through MCP with `search_knowledge_base` and optional `ask_knowledge_base`; keep ingestion and admin operations private. Compose reads the `RAG_LLM_*`, `RAG_API_KEY`, `RAG_CORS_ORIGINS`, `MONITOR_ENABLED`, and provider key values from your `.env` for substitution. On Linux hosts, `./data` must be writable by UID 1001, the user the API runs as.
 
+### Supply-chain security
+
+The supply-chain workflow audits Python dependencies and scans repository configuration, secrets, and vulnerabilities on dependency changes and every week. Image publishing also scans the final image, attaches BuildKit provenance and an SPDX JSON SBOM, and signs the immutable image digest with GitHub's OIDC identity. A high or critical fixed vulnerability stops the workflow before signing.
+
+Before deployment, verify the digest rather than trusting a mutable tag:
+
+```bash
+cosign verify \
+  --certificate-identity-regexp 'https://github.com/rajarshidattapy/production_rag/.github/workflows/docker-publish.yml@refs/(heads|tags)/.+' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  ghcr.io/rajarshidattapy/production-rag@sha256:<digest>
+```
+
+Each publish run exposes `production-rag-sbom.spdx.json` as a machine-readable workflow artifact; BuildKit also publishes an SBOM attestation alongside the image.
+
 ---
 
 ## Why Not LangChain?

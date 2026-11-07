@@ -1,0 +1,124 @@
+name: Supply Chain Security
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "requirements*.txt"
+      - "pyproject.toml"
+      - "setup.py"
+      - "Dockerfile"
+      - ".github/workflows/supply-chain.yml"
+  pull_request:
+    branches: [master]
+    paths:
+      - "requirements*.txt"
+      - "pyproject.toml"
+      - "setup.py"
+      - "Dockerfile"
+      - ".github/workflows/supply-chain.yml"
+  schedule:
+    # Re-scan unchanged dependencies as vulnerability databases evolve.
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-dependencies:
+    name: Python dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Audit production dependencies
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          python -m pip_audit --requirement requirements.txt --strict
+
+  repository-scan:
+    name: Vulnerabilities, secrets, and configuration
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Scan repository and dependency manifests
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: sarif
+          output: trivy-repository.sarif
+          exit-code: "0"
+
+      - name: Upload findings to code scanning
+        if: always() && github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-repository.sarif
+
+      - name: Enforce high and critical vulnerability gate
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: table
+          exit-code: "1"
+
+  published-image:
+    name: Re-scan published image
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/production-rag:latest
+    steps:
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Scan the currently published image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: sarif
+          output: trivy-published-image.sarif
+          exit-code: "0"
+
+      - name: Upload image findings to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-published-image.sarif
+
+      - name: Enforce published-image vulnerability gate
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          format: table
+          exit-code: "1"

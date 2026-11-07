@@ -113,16 +113,11 @@
 
 **Several servers**
 
-- **Use a Chroma server in production, not embedded Chroma.** Embedded mode can fail to read a freshly written collection and does not suit replicas; keep Chroma behind the internal Docker network.
 - **SQLite and** `ingest_jobs.json` **tie the app to one host.** API replicas on separate machines need a database server for accounts, chats, and jobs. *From the code.*
 - **The dashboard shows only the replica that answers it.** Use Prometheus and Grafana across replicas. *From the code.*
 - **Database Migration Framework:** Version database schema changes and apply them safely across deployments.
 
-**Supply chain**
 
-- **Dependency Vulnerability Scanning:** Scan Python dependencies and container images for known security vulnerabilities.
-- **Software Bill of Materials (SBOM):** Generate a machine-readable inventory of dependencies to improve supply-chain transparency.
-- **Container Image Signing:** Sign release images and verify their authenticity before deployment.
 
 
 
