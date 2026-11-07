@@ -38,7 +38,8 @@ Query -> Detect language -> Vector search            (default)
                          -> Context budget -> LLM -> Answer + citation list
                          -> Verify and repair        (only if self_heal=true)
 
-Deployment -> MCP server -> `search_knowledge_base` (and optional `ask_knowledge_base`)
+MCP clients -> /mcp (read-only) -> search_knowledge_base, ask_knowledge_base, get_passage,
+                               get_section, list_documents, knowledge_base_info
 ```
 
 ## Architecture
@@ -306,7 +307,7 @@ Citation support is a word-overlap heuristic, so it can catch a misattributed ci
 - **Query Embedding Cache** — A thread-safe in-process LRU (`RAG_EMBEDDING_QUERY_CACHE_SIZE`, default 256) avoids re-embedding repeated queries. With `RAG_REDIS_URL`, Redis becomes a TTL-bounded shared L2 cache across replicas; keys hash the model and query rather than storing raw query text. Hit/miss counts are in `/stats`, not `/metrics`.
 - **Cross-Encoder Reranking (opt-in)** — Reorders retrieved chunks before generation, on either vector or hybrid results. Enable with `"use_reranker": true`. The default model is `cross-encoder/ms-marco-MiniLM-L-6-v2`, chosen for its small size (about 80 MB) because reranking runs on one CPU thread. It was trained on English; for German or Spanish corpora, consider setting `RAG_RERANKER_MODEL=BAAI/bge-reranker-v2-m3`.
 - **Multilingual Routing** — `langdetect` runs per chunk at ingest and per query, routing to per-language ChromaDB collections (en/de/es; anything else falls back to `en`), with prompts translated via gettext. A query searches only its detected language's collection, so a German question will not find English documents.
-- **MCP Tool Exposure** — Deploy the RAG service as an MCP server for agent use, exposing `search_knowledge_base` and, optionally, `ask_knowledge_base`; ingestion and admin operations remain private.
+- **MCP Tool Exposure** — The API serves an MCP server at `/mcp` (`RAG_MCP_ENABLED=true`) with six read-only tools, including `search_knowledge_base` and `ask_knowledge_base` (a grounded answer with numbered citations). Ingestion and admin operations stay private. See [MCP server](#mcp-server).
 - **SSE Token Streaming** — `/query/stream` endpoint delivers tokens over Server-Sent Events as they are generated; compatible with any EventSource client.
 - **Background Ingestion** — `POST /ingest/async` queues a job and returns a `job_id` immediately (202). Jobs stream through a collection a batch at a time, report progress and per-file failures, and can be cancelled or resumed. The UI shows them live. See [Background indexing](#background-indexing).
 - **LLM Backends** — OpenAI or Anthropic via `RAG_LLM_PROVIDER`, chosen at startup, with streaming for both. Provider-qualified model names or an `sk-or-` key route the OpenAI client to OpenRouter (`RAG_OPENROUTER_MODE` overrides this).
@@ -408,6 +409,7 @@ If Chroma isn't running, queries return `503` and `/readyz` reports not ready. T
 | `POST` | `/ingest/jobs/{job_id}/retry`  | Run a cancelled, failed, or interrupted job again, skipping chunks already stored               |
 | `POST` | `/query`                | Synchronous Q&amp;A — returns answer + citations                                                       |
 | `POST` | `/query/stream`         | **SSE streaming** — streams tokens then citations                                                      |
+| `POST` | `/mcp`                  | [MCP server](#mcp-server) over Streamable HTTP, when `RAG_MCP_ENABLED=true` (`404` otherwise)          |
 
 
 ### Accounts and chats
@@ -427,6 +429,37 @@ These use the session cookie set by `/auth/register` or `/auth/login`, and also 
 | `POST` | `/chats/{chat_id}/messages` | Ask a question with the same body as `/query`, and save it with the answer |
 | `POST` | `/chats/{chat_id}/files` | Record documents ingested for this chat |
 | `POST` | `/chats/import` | Copy in a chat saved elsewhere; repeating an `import_id` changes nothing |
+
+### MCP server
+
+Agents and MCP clients (Claude, IDEs, agent frameworks) can use the knowledge base as tools. Set `RAG_MCP_ENABLED=true`, and the API serves MCP over Streamable HTTP at `/mcp`, behind the same `Authorization: Bearer <key>` as every other route. It is stateless, so any replica can answer any request.
+
+| Tool | What it returns |
+| ---- | --------------- |
+| `search_knowledge_base` | The best-matching passages, with document, page, section, score, and full text. Optional hybrid search, reranking, and a `document` to search only that file |
+| `ask_knowledge_base` | An answer from the documents only, with `[n]` markers matching numbered citations; `grounded: false` when nothing supports one. Optional self-healing |
+| `get_passage` | The full text of a passage, by a `chunk_id` from a search or citation |
+| `get_section` | The whole section a passage comes from |
+| `list_documents` | Documents in the knowledge base, with chunk, page, and version counts, filterable by name |
+| `knowledge_base_info` | Document and passage counts, languages, and the models in use |
+
+Every tool only reads. Nothing over MCP can ingest, upload, delete, reset, or manage users or chats. MCP clients have no account and no roles, so tools see only shared documents that aren't limited to roles by `RAG_SOURCE_ROLES`, including passages and sections fetched by ID. With `RAG_REDACT_ANSWERS=true`, all returned text is redacted. Passages flagged at screening carry `injection_suspected: true`, and the server's instructions tell clients to treat passage text as data.
+
+Requests must be addressed to this machine or to a host in `RAG_MCP_ALLOWED_HOSTS` (for example `rag.example.com` behind Caddy). That stops a web page from reaching a local server through DNS rebinding.
+
+```json
+{
+  "mcpServers": {
+    "knowledge-base": {
+      "type": "http",
+      "url": "https://rag.example.com/mcp",
+      "headers": { "Authorization": "Bearer <RAG_API_KEY>" }
+    }
+  }
+}
+```
+
+For a local client, run the same tools over stdio with `python -m src.mcp_server`.
 
 ### POST /query
 
@@ -545,6 +578,8 @@ All settings use the `RAG_` prefix and can be set via `.env` or environment vari
 | `RAG_CHAT_DB_PATH`               | `<RAG_DATA_DIR>/chat.db`               | SQLite file for accounts and chats; use a local disk        |
 | `RAG_ALLOW_SIGNUP`               | `true`                                 | Let anyone who can reach the server register                |
 | `RAG_ALLOW_STORE_RESET`          | `false`                                | Let `reset` on `/ingest` delete every user's documents      |
+| `RAG_MCP_ENABLED`                | `false`                                | Serve the read-only MCP server at `/mcp`                    |
+| `RAG_MCP_ALLOWED_HOSTS`          | (empty)                                | Comma-separated host names `/mcp` is reached by; `*` for any |
 | `RAG_SOURCE_AUTHORITY`           | `{}`                                   | JSON of folder to authority 0-100, e.g. `{"policies": 90}`   |
 | `RAG_DEFAULT_SOURCE_AUTHORITY`   | `50`                                   | Authority for documents in no configured folder             |
 | `RAG_SOURCE_COLLECTIONS`         | `{}`                                   | JSON of folder to collection name                           |
@@ -727,7 +762,7 @@ docker run -p 8000:8000 \
 docker compose up --build
 ```
 
-This starts the API, a private Chroma server, and a private ephemeral Redis instance. Redis shares query embeddings and authentication-attempt limits across API replicas; it does not cache generated answers or hold durable application data. Direct runs keep the original in-memory behavior unless `RAG_REDIS_URL` is set. For agent deployments, expose the service through MCP with `search_knowledge_base` and optional `ask_knowledge_base`; keep ingestion and admin operations private. Compose reads the `RAG_LLM_*`, `RAG_API_KEY`, `RAG_CORS_ORIGINS`, `MONITOR_ENABLED`, and provider key values from your `.env` for substitution. On Linux hosts, `./data` must be writable by UID 1001, the user the API runs as.
+This starts the API, a private Chroma server, and a private ephemeral Redis instance. Redis shares query embeddings and authentication-attempt limits across API replicas; it does not cache generated answers or hold durable application data. Direct runs keep the original in-memory behavior unless `RAG_REDIS_URL` is set. For agents, set `RAG_MCP_ENABLED=true` and `RAG_MCP_ALLOWED_HOSTS` to serve the read-only [MCP server](#mcp-server) at `/mcp`. Compose reads the `RAG_LLM_*`, `RAG_API_KEY`, `RAG_CORS_ORIGINS`, `MONITOR_ENABLED`, and provider key values from your `.env` for substitution. On Linux hosts, `./data` must be writable by UID 1001, the user the API runs as.
 
 ### Supply-chain security
 
@@ -925,6 +960,7 @@ python -m pytest tests/test_monitoring.py -v
 | `test_evaluation.py`          | LLM-as-Judge scorer, golden dataset, CI summary                                                   |
 | `test_monitoring.py`          | Tracer spans, MetricsCollector, circuit breaker, guardrails                                       |
 | `test_api.py`, `test_api_extensions.py` | FastAPI endpoints, auth, SSE streaming, upstream error mapping                          |
+| `test_mcp_server.py`          | MCP tools, their scope to shared unrestricted documents, redaction, and `/mcp` auth               |
 | `test_i18n.py`                | Language routing and localized responses                                                          |
 | `test_versioning.py`          | Version bump tooling                                                                              |
 | `test_healing_verifier.py`    | Verifier deterministic checks, LLM-judge parsing/degradation, failure classifier                  |
@@ -942,6 +978,7 @@ python -m pytest tests/test_monitoring.py -v
 production-grade-rag/
 ├── src/
 │   ├── api.py                  # FastAPI app, auth, SSE streaming, middleware, /metrics
+│   ├── mcp_server.py           # Read-only MCP tools, served at /mcp or over stdio
 │   ├── chat/
 │   │   └── store.py            # SQLite accounts, login sessions, and chat history
 │   ├── ingestion/

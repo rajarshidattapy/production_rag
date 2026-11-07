@@ -427,6 +427,23 @@ class VectorStore:
                 return ids
             offset += len(page)
 
+    def iter_metadata(self, where: dict[str, Any] | None = None, page_size: int = 5000):
+        """Yield the metadata of every chunk matching ``where``, in pages, without the text."""
+        offset = 0
+        while True:
+
+            def _get(collection: Any, _o: int = offset):
+                return collection.get(
+                    where=where, include=["metadatas"], limit=page_size, offset=_o
+                )
+
+            page = self._collection_call(_get).get("metadatas") or []
+            if page:
+                yield [dict(m or {}) for m in page]
+            if len(page) < page_size:
+                return
+            offset += len(page)
+
     def existing_ids(self, ids: list[str], batch_size: int = 500) -> set[str]:
         """Return which of ``ids`` are already stored."""
         found: set[str] = set()

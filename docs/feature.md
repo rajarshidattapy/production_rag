@@ -10,7 +10,7 @@
 
 **Updating and removing documents**
 
-- **Documents can't be deleted or updated.** There's no route for it (`delete_chunks` is unused), and an edited file adds new chunks beside the old ones, so answers can cite stale text. Needs a document table that tracks each file's chunks. *From the code.*
+- **Documents can't be deleted or updated.** There's no route for it (`delete_chunks` is unused), and an edited file adds new chunks beside the old ones, so answers can cite stale text. Needs a document table that tracks each file's chunks. The MCP `list_documents` tool would read it too: today it reads the metadata of every chunk again after each change to the store, on each replica. *From the code.*
 - **Document Versioning:** Maintain document versions and ensure updated files replace or supersede stale indexed content. Each version is now recorded (`version_id`, `document_key`, `document_date`), and an edited file is stored beside the old one; nothing yet hides or removes the old version.
 - **Uploads are never cleaned up.** `data/uploads` only grows, even after a chat is deleted. *From the code.*
 - `/upload` **holds each file in memory**, up to 50 MB per concurrent upload. Stream to disk. *From the code.*
@@ -53,7 +53,7 @@
 - **Parent-Child Retrieval:** Retrieve precise child chunks for relevance while supplying their larger parent sections for sufficient context. Ingestion already records each chunk's `parent_id` and stores the parent's text (`RAGPipeline.get_parents`), so this is retrieval-only work.
 - **Temporal Retrieval:** Prefer current document versions and distinguish historical information from the latest available facts. The metadata it needs is already recorded on every chunk: `document_key`, `version_id`, `document_date`, and `ingested_at`.
 - **Context Compression:** Remove redundant passages and compress retrieved evidence while preserving information needed to answer accurately.
-- **Fine-Grained Authorization:** Enforce document-, collection-, and role-level permissions during retrieval, not merely at the API endpoint. Chunks and parents now carry `collection`, `restricted`, and `roles`, set per folder with `RAG_SOURCE_COLLECTIONS` and `RAG_SOURCE_ROLES`; users don't have roles yet, and retrieval doesn't filter on them.
+- **Fine-Grained Authorization:** Enforce document-, collection-, and role-level permissions during retrieval, not merely at the API endpoint. Chunks and parents now carry `collection`, `restricted`, and `roles`, set per folder with `RAG_SOURCE_COLLECTIONS` and `RAG_SOURCE_ROLES`; users don't have roles yet, and retrieval doesn't filter on them. MCP clients have no roles either, so `/mcp` leaves out every restricted document.
 
 ### Stage 3: Generation
 
@@ -93,17 +93,13 @@
 - **All blocking work shares one thread pool** of CPU count + 4, capped at 32. Retrieval and reranking use it, and self-healing holds a thread through every LLM call in its loop, so slow LLM responses starve all other queries. A 504 doesn't free the thread. Needs separate pools or an async healing loop. *From the code.*
 - **Bulkhead Isolation:** Isolate ingestion, retrieval, reranking, and generation resources so overload in one subsystem does not bring down the others.
 - **Request Cancellation Propagation:** Cancel downstream retrieval, reranking, and LLM operations when the client disconnects or the request times out.
-- **No per-user rate limits or spending caps.** Nothing limits LLM cost on `/query`, and self-healing can make several LLM calls per question. *From the code.*
+- **No per-user rate limits or spending caps.** Nothing limits LLM cost on `/query` or MCP's `ask_knowledge_base`, and self-healing can make several LLM calls per question. MCP clients all use the one `RAG_API_KEY`, so one client can't be limited or revoked alone; give each its own key. *From the code.*
 - **Chat and message lists aren't paginated**, so a heavy user gets everything on every load. *From the code.*
 
 **Security**
 
 - **Audit Logging:** Record security-sensitive actions such as uploads, queries, document modifications, deletions, and administrative operations without exposing sensitive content.
 - **Secrets Management:** Store API keys, database credentials, and encryption keys using a dedicated secrets manager instead of relying solely on environment variables.
-
-**Access for other tools**
-
-- **MCP server:** when deploying, expose the RAG service as an MCP server with `search_knowledge_base` (required) and `ask_knowledge_base` (optional, grounded answer with citations); keep ingestion and admin operations private.
 
 ### Stage 6: Infrastructure
 
@@ -165,7 +161,7 @@ Vultr's automatic backups add 20%, about $4 to$5. A domain is roughly $1 a month
           volumes: [caddy_data:/data]
    ```
 
-      Also set `FORWARDED_ALLOW_IPS=*` in `.env`, but only once port 8000 isn't published. Without it, every user shares Caddy's address and one login limit.
+      Also set `FORWARDED_ALLOW_IPS=*` in `.env`, but only once port 8000 isn't published. Without it, every user shares Caddy's address and one login limit. With `RAG_MCP_ENABLED=true`, also set `RAG_MCP_ALLOWED_HOSTS=rag.example.com`, or `/mcp` refuses requests for that host.
 3. **Pull the image instead of building on the VM.** Replace `build:` with the image the publish workflow pushes to GHCR. Building on a 4 GB VM is slow, because it downloads PyTorch and the models.
 4. **Give shutdown time to finish** with `stop_grace_period: 90s` on `api`. The Docker default of 10 s can cut off an indexing batch. That's recoverable with Run again, but it's avoidable.
 5. **Restore a backup once**, so you know it works before you need it.

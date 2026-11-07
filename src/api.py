@@ -27,7 +27,7 @@ from typing import Any, Literal
 
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
@@ -38,6 +38,7 @@ from prometheus_client import (
 )
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.routing import Route
 
 from src.chat.store import AccountLockedError, ChatStore, User, UsernameTakenError
 from src.config import settings as _settings
@@ -122,10 +123,55 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if _settings.warm_up_on_start:
         await asyncio.to_thread(_warm_up)
     try:
-        yield
+        async with _serve_mcp():
+            yield
     finally:
         _interrupt_active_ingest_jobs()
         close_redis_clients()
+
+
+# Handles /mcp while the server runs with RAG_MCP_ENABLED on.
+_mcp_sessions: Any = None
+
+
+@asynccontextmanager
+async def _serve_mcp() -> AsyncIterator[None]:
+    global _mcp_sessions
+    if not _settings.mcp_enabled:
+        yield
+        return
+    from src.mcp_server import build_server, transport_security
+
+    if not _RAG_API_KEY:
+        logger.warning("MCP is on without RAG_API_KEY: anyone who can reach /mcp can search.")
+    server = build_server(get_pipeline)
+    # Stateless, so any replica can answer any request without sticky sessions.
+    server.streamable_http_app(
+        stateless_http=True, json_response=True, transport_security=transport_security()
+    )
+    async with server.session_manager.run():
+        _mcp_sessions = server.session_manager
+        try:
+            yield
+        finally:
+            _mcp_sessions = None
+
+
+class _MCPEndpoint:
+    """``/mcp``, behind the API key. A plain ASGI app, so route dependencies don't apply."""
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        sessions = _mcp_sessions
+        if sessions is None:
+            await JSONResponse({"detail": "Not Found"}, status_code=404)(scope, receive, send)
+            return
+        try:
+            _check_api_key(Request(scope).headers.get("authorization"))
+        except HTTPException as exc:
+            response = JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+            await response(scope, receive, send)
+            return
+        await sessions.handle_request(scope, receive, send)
 
 
 app = FastAPI(
@@ -141,6 +187,9 @@ app = FastAPI(
 # an Authorization header.
 _auth = Depends(_check_api_key)
 _UI_PATH = Path(__file__).resolve().parents[1] / "index.html"
+app.router.routes.append(
+    Route("/mcp", _MCPEndpoint(), methods=["GET", "POST", "DELETE"], include_in_schema=False)
+)
 
 
 class _RequestIDMiddleware(BaseHTTPMiddleware):
