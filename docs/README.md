@@ -440,7 +440,7 @@ Agents and MCP clients (Claude, IDEs, agent frameworks) can use the knowledge ba
 | `ask_knowledge_base` | An answer from the documents only, with `[n]` markers matching numbered citations; `grounded: false` when nothing supports one. Optional self-healing |
 | `get_passage` | The full text of a passage, by a `chunk_id` from a search or citation |
 | `get_section` | The whole section a passage comes from |
-| `list_documents` | Documents in the knowledge base, with chunk, page, and version counts, filterable by name |
+| `list_documents` | Documents in the knowledge base, with chunk, last-indexed-page, and version counts, filterable by name |
 | `knowledge_base_info` | Document and passage counts, languages, and the models in use |
 
 Every tool only reads. Nothing over MCP can ingest, upload, delete, reset, or manage users or chats. MCP clients have no account and no roles, so tools see only shared documents that aren't limited to roles by `RAG_SOURCE_ROLES`, including passages and sections fetched by ID. With `RAG_REDACT_ANSWERS=true`, all returned text is redacted. Passages flagged at screening carry `injection_suspected: true`, and the server's instructions tell clients to treat passage text as data.
