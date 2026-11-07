@@ -127,7 +127,7 @@ Attaching PDFs or choosing a folder under **Server folder** in the UI starts a b
 - **Cancel:** Stops after the current batch, which can take about a minute on a CPU. Text already indexed stays searchable.
 - **Run again:** Available on a cancelled, failed, or interrupted job. Chunks already stored are skipped, so it resumes rather than re-embedding everything. It reads every file again to find what's missing.
 - **Restarts:** A graceful shutdown waits for the current batch, so a container manager's stop timeout may end it first, which counts as a crash. After a restart or crash the job is reported as `interrupted`. A crash loses at most the chunks still waiting for their batch, and **Run again** restores them.
-- **Queue:** Each server process runs one job at a time, in order, because indexing is CPU-bound. Questions keep working meanwhile.
+- **Queue:** The default `local` mode runs one job at a time in a worker thread because indexing is CPU-bound; it needs no broker and is the right default for one API process. Replica deployments can set `RAG_INGEST_QUEUE=celery` and run one Celery worker so every API replica shares a durable queue. Celery is intentionally not enabled by default: indexing is the only long-running job, so its broker and separate worker are overhead until replicas are in use.
 - **Uploads:** Files go to the server one at a time before the job starts, so keep the tab open until the job appears. For a very large collection, put the files on the server and use **Server folder**. The path must be inside `RAG_DATA_DIR`.
 - **Visibility:** A job started while signed in belongs to that user, and so do the documents it adds. `GET /ingest/jobs` lists only your own jobs, and other users get `404` for them.
 
@@ -776,6 +776,14 @@ docker compose up --build
 
 This starts the API, a private Chroma server, and a private ephemeral Redis instance. Redis shares query embeddings and authentication-attempt limits across API replicas; it does not cache generated answers or hold durable application data. Direct runs keep the original in-memory behavior unless `RAG_REDIS_URL` is set. For agents, set `RAG_MCP_ENABLED=true` and `RAG_MCP_ALLOWED_HOSTS` to serve the read-only [MCP server](#mcp-server) at `/mcp`. Compose reads the `RAG_LLM_*`, `RAG_API_KEY`, `RAG_CORS_ORIGINS`, `MONITOR_ENABLED`, and provider key values from your `.env` for substitution. On Linux hosts, `./data` must be writable by UID 1001, the user the API runs as.
 
+For API replicas, put `RAG_INGEST_QUEUE=celery` in `.env` and start the opt-in profile:
+
+```bash
+docker compose --profile celery up --build
+```
+
+The profile adds a persistent Redis broker and one Celery indexing worker with concurrency fixed at one. The API and worker must share `RAG_DATA_DIR`; the included Compose stack bind-mounts `./data` into both. Keep `RAG_CELERY_VISIBILITY_TIMEOUT_SECONDS` longer than the largest indexing job so an unacknowledged job is not delivered twice. A multi-host deployment still needs the job JSON and SQLite chat store moved to a database shared by every host.
+
 ### Supply-chain security
 
 The supply-chain workflow audits Python dependencies and scans repository configuration, secrets, and vulnerabilities on dependency changes and every week. Image publishing also scans the final image, attaches BuildKit provenance and an SPDX JSON SBOM, and signs the immutable image digest with GitHub's OIDC identity. A high or critical fixed vulnerability stops the workflow before signing.
@@ -807,6 +815,7 @@ This project builds retrieval, fusion, reranking, and generation directly agains
 What changes as load grows, based on what has actually been measured. All numbers are from one Windows 11 laptop (16.8 GB RAM), and retrieval timings use stub embeddings. Treat them as relative guidance, not capacity figures.
 
 - **Horizontal scaling:** The drill ran two API replicas with separate disks on one Chroma server. Reads worked, a document ingested through one replica was found by the other, and a replica recovers on its own after another resets the store. Two caveats: async job status is only shared if replicas share a disk, and each replica detects BM25 staleness by chunk count, so a same-count replacement ingested elsewhere goes unnoticed.
+- **Indexing workers:** Keep the broker-free local queue for one API process. With replicas, Celery gives them one durable indexing queue and keeps CPU-heavy embedding outside the API processes; run exactly one indexing worker until reset jobs and indexing can safely execute in parallel.
 - **Hybrid search at scale:** At 50k chunks, BM25 queries took 2-3 ms and a cold index load 0.2 s. A full rebuild took about 5 s. Memory measured at 100k chunks was about 1.2 KB per chunk, which extrapolates to about 1.2 GB at 1M chunks and needs `RAG_BM25_MAX_INDEX_MB` near 2000. The 1M figures have not been run.
 - **Vector search:** `RAG_HNSW_EF_SEARCH` matters most. On 50k synthetic vectors, recall@10 was 0.74 at 10, 0.996 at 100, and 1.000 at 200, with the same latency of about 1.4 ms. The default is 200. A single Chroma instance has no sharding or replicas. The per-language collections are a natural shard boundary if you move to a distributed vector database.
 - **Where the time goes:** In production the LLM call and reranker should dominate, not the vector store. This has not been measured with a real provider or model, so load-test those before sizing anything.

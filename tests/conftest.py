@@ -46,6 +46,8 @@ def isolate_chroma_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(settings, "chroma_port", None)
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     monkeypatch.setattr(settings, "allow_store_reset", True)
+    # A developer may use Celery in .env; unit tests must never publish to their broker.
+    monkeypatch.setattr(settings, "ingest_queue", "local")
     # Loading real models at every app start would make the suite slow; warm-up has its tests.
     monkeypatch.setattr(settings, "warm_up_on_start", False)
 
