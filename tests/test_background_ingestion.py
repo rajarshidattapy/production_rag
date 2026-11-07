@@ -481,7 +481,7 @@ class TestRestartAndShutdown:
         job = _wait(TestClient(api_app.app), job_id)
         assert job["status"] == "completed"
 
-    def test_redelivered_job_resumes_after_a_worker_crash(self, corpus: Path) -> None:
+    def test_redelivered_job_completes_after_a_worker_crash(self, corpus: Path) -> None:
         client = _signed_in()
         user = api_app.get_chat_store().user_for_session(client.cookies["rag_session"])
         assert user is not None
