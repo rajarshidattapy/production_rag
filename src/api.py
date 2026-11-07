@@ -118,6 +118,10 @@ def _configure_logging() -> None:
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     _configure_logging()
+    # Register code-shipped prompt versions without replacing an explicitly active version.
+    from src.prompt_catalog import sync_builtin_prompts
+
+    await asyncio.to_thread(sync_builtin_prompts, actor="startup")
     # The server accepts no request until this returns.
     if _settings.warm_up_on_start:
         await asyncio.to_thread(_warm_up)

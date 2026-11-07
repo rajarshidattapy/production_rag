@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     chroma_port: int | None = None
     golden_dataset_path: Path = Path("data/golden_dataset/dataset.jsonl")
     eval_results_path: Path = Path("data/eval_results")
+    # Immutable runtime prompt versions and their active/rollback history.
+    prompt_db_path: Path | None = None
 
     # ---------- Embedding model ----------
     embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
@@ -189,6 +191,10 @@ class Settings(BaseSettings):
     @property
     def chat_db_file(self) -> Path:
         return self.chat_db_path or self.data_dir / "chat.db"
+
+    @property
+    def prompt_db_file(self) -> Path:
+        return self.prompt_db_path or self.data_dir / "prompts.db"
 
 
 settings = Settings()

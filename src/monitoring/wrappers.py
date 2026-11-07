@@ -97,6 +97,9 @@ def _get_default_system_prompt() -> str:
         import importlib
 
         generator_mod = importlib.import_module("src.generation.generator")
+        resolver = getattr(generator_mod, "get_default_system_prompt", None)
+        if resolver is not None:
+            return resolver()
         return getattr(generator_mod, "DEFAULT_SYSTEM_PROMPT", "")
     except ImportError:
         return ""
