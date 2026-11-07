@@ -112,7 +112,7 @@
 **Several servers**
 
 - **SQLite and** `ingest_jobs.json` **tie the app to one host.** API replicas on separate machines need a database server for accounts, chats, and jobs. *From the code.*
-- **The built-in dashboard shows only the replica that answers it.** The optional Compose `observability` profile now supplies Prometheus service discovery and a provisioned Grafana dashboard for multi-replica deployments; leave it disabled on a single server. *From the code.*
+- **The built-in dashboard shows only the replica that answers it.** The optional Compose `observability` profile aggregates replicas on one Docker host only; replicas on separate machines still need cross-host Prometheus discovery. *From the code.*
 - **Database Migration Framework:** Version database schema changes and apply them safely across deployments.
 
 
