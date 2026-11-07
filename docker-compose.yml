@@ -44,7 +44,7 @@ services:
     ports:
       # A range keeps the one-replica default on 8000 and lets `--scale api=N`
       # publish additional replicas on 8001, 8002, and so on.
-      - "127.0.0.1:${RAG_API_PORT_RANGE:-8000-8009}:8000"
+      - "${RAG_API_PORT_RANGE:-8000-8009}:8000"
     environment:
       - RAG_CHROMA_HOST=chroma
       - RAG_CHROMA_PORT=8000
