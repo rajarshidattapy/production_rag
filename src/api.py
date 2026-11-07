@@ -33,6 +33,7 @@ from prometheus_client import (
     CollectorRegistry,
     Counter,
     Histogram,
+    ProcessCollector,
     generate_latest,
 )
 from pydantic import BaseModel, Field
@@ -100,8 +101,26 @@ async def setup_locale(accept_language: str | None = Header(None)):
         _current_translation.reset(token)
 
 
+def _configure_logging() -> None:
+    """Show the app's own log lines at RAG_LOG_LEVEL.
+
+    uvicorn configures only its own loggers, so without this every INFO line from the app
+    (warm-up timings, ingestion, re-screening) is silently dropped.
+    """
+    app_logger = logging.getLogger("src")
+    app_logger.setLevel(_settings.log_level.upper())
+    if not app_logger.handlers and not logging.getLogger().handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+        app_logger.addHandler(handler)
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    _configure_logging()
+    # The server accepts no request until this returns.
+    if _settings.warm_up_on_start:
+        await asyncio.to_thread(_warm_up)
     yield
     _interrupt_active_ingest_jobs()
 
@@ -145,6 +164,8 @@ app.add_middleware(_RequestIDMiddleware)
 # import-order-safe under repeated test-suite app construction.
 # ---------------------------------------------------------------------------
 _metrics_registry = CollectorRegistry()
+# Memory, CPU, and open files of this process (Linux only), for soak tests and alerting.
+ProcessCollector(registry=_metrics_registry)
 _http_requests_total = Counter(
     "rag_http_requests_total",
     "Total HTTP requests handled, by path and status code",
@@ -473,20 +494,77 @@ def ui() -> FileResponse:
     return FileResponse(_UI_PATH)
 
 
+_models_warm = threading.Event()
+
+
+def _warm_up_models() -> dict[str, float]:
+    """Load every model and run it once. Safe to repeat: loaded models are reused.
+
+    Needs no database, so a slow-starting Chroma doesn't stop the models from loading.
+    """
+    from src.pipeline import _detect_language
+    from src.retrieval.vector_store import _ChromaEmbeddingFunction
+
+    timings: dict[str, float] = {}
+    start = time.perf_counter()
+    _ChromaEmbeddingFunction(model_name=_settings.embedding_model).embed_document(["warm up"])
+    timings["embedding_model"] = time.perf_counter() - start
+
+    start = time.perf_counter()
+    _detect_language("Warming up the language detector.")
+    timings["language_detection"] = time.perf_counter() - start
+
+    if _settings.warm_up_reranker:
+        start = time.perf_counter()
+        get_pipeline()._get_reranker().rerank("warm up", [{"document": "warm up"}], top_k=1)
+        timings["reranker_model"] = time.perf_counter() - start
+    _models_warm.set()
+    return timings
+
+
+def _warm_up_search_indexes() -> dict[str, float]:
+    """Open each language's store and load or build its BM25 index. Best effort."""
+    timings: dict[str, float] = {}
+    pipeline = get_pipeline()
+    for lang in ("en", "de", "es"):
+        start = time.perf_counter()
+        try:
+            pipeline._get_hybrid_retriever(lang)
+        except Exception as exc:
+            # Chroma may still be starting. Requests will build the index on first use.
+            logger.warning("Could not warm up the %s search index: %s", lang, exc)
+            continue
+        timings[f"search_index_{lang}"] = time.perf_counter() - start
+    return timings
+
+
+def _warm_up() -> None:
+    """Called once at start-up, before any request is accepted."""
+    start = time.perf_counter()
+    try:
+        timings = _warm_up_models()
+    except Exception:
+        logger.exception("A model failed to load, so the server won't start")
+        raise
+    timings.update(_warm_up_search_indexes())
+    logger.info(
+        "Warmed up in %.1f s: %s",
+        time.perf_counter() - start,
+        ", ".join(f"{name} {seconds:.1f} s" for name, seconds in timings.items()),
+    )
+
+
 @app.get("/readyz", response_model=HealthResponse, dependencies=[_auth])
 def readyz() -> HealthResponse:
-    """Readiness probe checking database access and eager-loading models."""
+    """Readiness probe: models loaded, the database reachable, and the search indexes open."""
     try:
-        # 1. Eagerly import heavy dependencies
-        import sentence_transformers  # noqa: F401
-
-        # 2. Warm up components for all supported languages
+        if not _models_warm.is_set():
+            _warm_up_models()
         pipeline = get_pipeline()
         for lang in ["en", "de", "es"]:
             # Objects built by an earlier call are cached, so ask the database directly.
             pipeline._get_vector_store(lang).heartbeat()
             _ = pipeline._get_hybrid_retriever(lang)
-        _ = pipeline._get_reranker()
 
         return HealthResponse(status="ok")
     except Exception as exc:

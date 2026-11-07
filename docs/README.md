@@ -179,6 +179,22 @@ Each chunk records the settings it was screened with in `screening`. After chang
 
 The patterns are signals, not verdicts: they miss instructions they don't describe.
 
+### Start-up and load testing
+
+**Warm-up.** Before the server accepts a request, it loads and runs the embedding model, the language detector, and the reranker, then opens each language's search index, logging how long each took. A model that can't load stops the server from starting, so a broken image fails at deploy time rather than on the first question. If Chroma is still starting, the indexes are built on first use instead. `RAG_WARM_UP_ON_START=false` skips it, and `RAG_WARM_UP_RERANKER=false` leaves the reranker unloaded to save memory. `/readyz` reports ready only once models are loaded, Chroma answers, and the indexes are open.
+
+**Load and soak testing.** `scripts/load_test.py` sends sustained concurrent `/query` traffic and reports latency percentiles, throughput, errors, the windows in which errors happened, and memory over time. It runs a sequential baseline, the concurrent soak, then a sequential recovery check, and exits non-zero if the soak breaks its limits: error rate, p95 latency, failures after the load stops, latency that doesn't return to baseline, or memory still growing in the second half. A fake OpenAI-compatible LLM keeps the test from measuring, or paying for, a real one:
+
+```bash
+python -m scripts.load_test fake-llm --port 9100 --latency 0.8
+OPENAI_BASE_URL=http://127.0.0.1:9100/v1 uvicorn src.api:app --port 8000
+python -m scripts.load_test run --concurrency 16 --duration 300 --pid <uvicorn PID>
+```
+
+Memory comes from `--pid` locally, or from `process_resident_memory_bytes` on `/metrics` on Linux.
+
+Measured on one Windows machine with the real models, a Chroma server, and a 0.8 s fake LLM, over a 3-minute soak at 16 concurrent with half the queries hybrid: 2,219 queries at 12.3 per second, p50 1.14 s, p95 1.46 s, p99 1.70 s, memory steady at 1.4 GB. Chroma was killed for 20 s partway: the 16 queries in flight got `503`, the rest waited and succeeded, and latency returned to baseline without a restart.
+
 ### Accounts and chat history
 
 The browser UI requires an account. Chats are stored on the server in SQLite (`data/chat.db`, or `RAG_CHAT_DB_PATH`), so they follow the user across browsers and devices and survive restarts. Chats that older versions left in a browser's `localStorage` are moved into the account after the user confirms, the first time they sign in on that browser.
@@ -280,7 +296,7 @@ Citation support is a word-overlap heuristic, so it can catch a misattributed ci
 - **Context Budget** — `RAG_MAX_CONTEXT_CHARS` (default 12000) caps the context sent to the LLM as a cost guardrail. Passages past the budget are dropped, and the last one that fits is cut at the character limit, which can be mid-sentence.
 - **Security Hardening** — Path-traversal guards on `/ingest`, BM25 index stored as plain integer arrays loaded with `allow_pickle=False` (no pickle), 0o600 file permissions on data files, `re.escape()` on pricing pattern matching to prevent ReDoS.
 - **Docker Multi-Stage Build** — `deps → model-cache → runtime` stages; non-root user, with the default embedding and reranker models cached in the image. The image and compose stack have not been run end to end yet; see [known gaps](#known-gaps-to-close-before-production).
-- **Tests and CI** — 685 unit, integration, and stress tests (LLM calls mocked; no API keys needed). GitHub Actions workflows cover CI, the evaluation gate (skipped when the `OPENAI_API_KEY` secret is absent), and GHCR publish on every push to `master`.
+- **Tests and CI** — 718 unit, integration, and stress tests (LLM calls mocked; no API keys needed). GitHub Actions workflows cover CI, the evaluation gate (skipped when the `OPENAI_API_KEY` secret is absent), and GHCR publish on every push to `master`.
 
 ---
 
@@ -508,6 +524,8 @@ All settings use the `RAG_` prefix and can be set via `.env` or environment vari
 | `RAG_REDACT_CREDENTIALS`         | `true`                                 | Replace API keys, private keys, tokens, and passwords       |
 | `RAG_PII_MODE`                   | `flag`                                 | Personal data: `flag`, `redact`, or `off`                   |
 | `RAG_INJECTION_MODE`             | `flag`                                 | Instruction-like text: `flag`, or `exclude` from the index  |
+| `RAG_WARM_UP_ON_START`           | `true`                                 | Load models and search indexes before accepting requests    |
+| `RAG_WARM_UP_RERANKER`           | `true`                                 | Include the reranker in the warm-up                         |
 | `RAG_INJECTION_TRUSTED_AUTHORITY` | *(unset)*                             | Sources at or above this authority are never marked suspect |
 | `RAG_REDACT_ANSWERS`             | `false`                                | Redact credentials and personal data from what is returned  |
 | `RAG_SOURCE_ROLES`               | `{}`                                   | JSON of folder to the roles allowed to read it              |

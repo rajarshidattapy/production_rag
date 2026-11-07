@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 # Module-level cache so all VectorStore instances using the same model share one copy.
 _EMBEDDING_MODEL_CACHE: dict[str, Any] = {}
+# Concurrent first requests would otherwise each load the model, using its memory twice.
+_EMBEDDING_MODEL_LOCK = threading.Lock()
 
 T = TypeVar("T")
 
@@ -580,7 +582,10 @@ class _ChromaEmbeddingFunction:
     def _lazy_load(self) -> None:
         if self._model is not None:
             return
+        with _EMBEDDING_MODEL_LOCK:
+            self._load_model()
 
+    def _load_model(self) -> None:
         if self.model_name in _EMBEDDING_MODEL_CACHE:
             self._model = _EMBEDDING_MODEL_CACHE[self.model_name]
             logger.debug("Reusing cached embedding model: %s", self.model_name)

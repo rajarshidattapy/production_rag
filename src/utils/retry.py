@@ -24,6 +24,20 @@ _NEVER_RETRY: tuple[type[Exception], ...] = (
     NotImplementedError,
 )
 
+# Rejections that can succeed later: timeout, conflict, and rate limiting.
+_RETRYABLE_CLIENT_STATUSES = {408, 409, 429}
+
+
+def _is_permanent(exc: Exception) -> bool:
+    """A 4xx answer from an API (bad request, bad key, unknown model): retrying just waits.
+
+    Covers the OpenAI and Anthropic SDK errors, which carry ``status_code``.
+    """
+    status = getattr(exc, "status_code", None)
+    return (
+        isinstance(status, int) and 400 <= status < 500 and status not in _RETRYABLE_CLIENT_STATUSES
+    )
+
 
 def retry_with_backoff(
     fn: Callable[[], T],
@@ -44,6 +58,8 @@ def retry_with_backoff(
         except _NEVER_RETRY:
             raise
         except Exception as e:
+            if _is_permanent(e):
+                raise
             if x == retries:
                 logger.error("Failed after %d retries: %s", retries, e)
                 raise
@@ -75,6 +91,8 @@ async def async_retry_with_backoff(
         except _NEVER_RETRY:
             raise
         except Exception as e:
+            if _is_permanent(e):
+                raise
             if x == retries:
                 logger.error("Failed after %d retries: %s", retries, e)
                 raise

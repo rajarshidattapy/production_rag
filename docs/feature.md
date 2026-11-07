@@ -89,17 +89,13 @@
 - **Semantic Retry Termination:** Stop healing attempts when new retrieval results provide no meaningful evidence improvement.
 - **Healing Cost Budget:** Enforce per-query limits on additional LLM calls, tokens, retrieval attempts, and total healing latency.
 
-**Testing the verifier**
-
-- **Adversarial Healing Evaluation:** Test the healing pipeline against prompt injection, fabricated citations, misleading evidence, contradictory sources, and verifier failures.
-- **False-Acceptance Evaluation:** Measure how often the verifier incorrectly approves unsupported answers and how often it rejects correct ones.
-
 ### Stage 5: API and users
 
 *Mostly `src/api.py` and `src/chat/`.*
 
 **Handling load**
 
+- **Concurrent queries are CPU-bound.** The service's own time per query grew from about 60 ms alone to about 340 ms at 16 concurrent, capping throughput at about 12 queries per second with a 0.8 s LLM where 20 would be possible. Profile retrieval under load (query embedding, BM25, language detection) before adding replicas. *Measured with `scripts/load_test.py`: 2,219 queries in 3 minutes, p95 1.46 s.*
 - **All blocking work shares one thread pool** of CPU count + 4, capped at 32. Retrieval and reranking use it, and self-healing holds a thread through every LLM call in its loop, so slow LLM responses starve all other queries. A 504 doesn't free the thread. Needs separate pools or an async healing loop. *From the code.*
 - **Bulkhead Isolation:** Isolate ingestion, retrieval, reranking, and generation resources so overload in one subsystem does not bring down the others.
 - **Request Cancellation Propagation:** Cancel downstream retrieval, reranking, and LLM operations when the client disconnects or the request times out.
@@ -126,11 +122,6 @@
 - **SQLite and** `ingest_jobs.json` **tie the app to one host.** API replicas on separate machines need a database server for accounts, chats, and jobs. *From the code.*
 - **The dashboard shows only the replica that answers it.** Use Prometheus and Grafana across replicas. *From the code.*
 - **Database Migration Framework:** Version database schema changes and apply them safely across deployments.
-
-**Startup and load**
-
-- **Graceful Model Warm-Up:** Load and initialize embedding, reranking, and other model components before accepting production traffic.
-- **Load and Soak Testing:** Validate latency, throughput, memory consumption, and recovery behaviour under sustained concurrent traffic.
 
 **Supply chain**
 

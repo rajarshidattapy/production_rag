@@ -166,6 +166,13 @@ class Settings(BaseSettings):
     # `reset` on /ingest deletes every user's documents, so the API refuses it unless enabled.
     allow_store_reset: bool = False
 
+    # ---------- Start-up ----------
+    # Load and run every model, and build the search indexes, before accepting requests, so
+    # no request pays for it. A model that can't load stops the server from starting.
+    warm_up_on_start: bool = True
+    # The reranker is only used when a request asks for it; skipping it saves memory.
+    warm_up_reranker: bool = True
+
     # ---------- Logging ----------
     log_level: str = "INFO"
 

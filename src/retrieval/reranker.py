@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -19,9 +20,16 @@ class CrossEncoderReranker:
     def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2") -> None:
         self.model_name = model_name
         self._model = None
+        self._load_lock = threading.Lock()
 
     def _lazy_load(self) -> None:
-        """Load the cross-encoder model on first use."""
+        """Load the cross-encoder model on first use, once even under concurrent requests."""
+        if self._model is not None:
+            return
+        with self._load_lock:
+            self._load()
+
+    def _load(self) -> None:
         if self._model is None:
             try:
                 import torch

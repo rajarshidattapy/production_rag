@@ -12,6 +12,25 @@ from src.ingestion.chunker import Chunker
 from src.ingestion.loader import Document
 
 
+def _raise_windows_open_file_limit() -> None:
+    """Embedded Chroma keeps four C runtime file streams open per index, and the suite creates
+    hundreds of temporary stores in one process. Windows allows 512 by default, after which
+    anything else that opens a file fails (Chroma fixes this in an unreleased version, #7869).
+    Production runs on Linux and keeps only a few collections open, so this is a test-only limit.
+    """
+    if sys.platform != "win32":
+        return
+    import ctypes
+
+    try:
+        ctypes.cdll.ucrtbase._setmaxstdio(8192)
+    except (OSError, AttributeError):
+        pass
+
+
+_raise_windows_open_file_limit()
+
+
 @pytest.fixture(autouse=True)
 def isolate_chroma_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Force all tests to use an isolated ChromaDB directory, avoiding locks.
@@ -27,6 +46,8 @@ def isolate_chroma_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(settings, "chroma_port", None)
     monkeypatch.setattr(settings, "data_dir", tmp_path)
     monkeypatch.setattr(settings, "allow_store_reset", True)
+    # Loading real models at every app start would make the suite slow; warm-up has its tests.
+    monkeypatch.setattr(settings, "warm_up_on_start", False)
 
 
 @pytest.fixture(autouse=True)
