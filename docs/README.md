@@ -125,8 +125,8 @@ Attaching PDFs or choosing a folder under **Server folder** in the UI starts a b
 - **Bad files:** A file that can't be read, or a PDF with no extractable text, is listed on the job and skipped. The rest of the collection still gets indexed.
 - **Cancel:** Stops after the current batch, which can take about a minute on a CPU. Text already indexed stays searchable.
 - **Run again:** Available on a cancelled, failed, or interrupted job. Chunks already stored are skipped, so it resumes rather than re-embedding everything. It reads every file again to find what's missing.
-- **Restarts:** A graceful shutdown waits for the current batch, so a container manager's stop timeout may end it first, which counts as a crash. After a restart or crash the job is reported as `interrupted`. A crash loses at most the chunks still waiting for their batch, and **Run again** restores them.
-- **Queue:** Each server process runs one job at a time, in order, because indexing is CPU-bound. Questions keep working meanwhile.
+- **Restarts:** A graceful shutdown waits for the current batch, so a container manager's stop timeout may end it first, which counts as a crash. After a restart or crash the job is reported as `interrupted`. A crash loses at most the chunks still waiting for their batch, and **Run again** restores them. With the Kafka queue, an interrupted or waiting job runs again by itself once a server is back.
+- **Queue:** Jobs run one at a time, in order, because indexing is CPU-bound. Questions keep working meanwhile. By default (`RAG_INGEST_QUEUE=local`) each server process has its own queue and waiting jobs are lost on restart. With `RAG_INGEST_QUEUE=kafka`, jobs wait on a single-partition Kafka topic: they survive restarts, replicas share one queue, and only one replica runs jobs at a time. The app creates the topic if it is missing and refuses to start on a topic with more than one partition. Locally, run `docker compose --profile kafka up`.
 - **Uploads:** Files go to the server one at a time before the job starts, so keep the tab open until the job appears. For a very large collection, put the files on the server and use **Server folder**. The path must be inside `RAG_DATA_DIR`.
 - **Visibility:** A job started while signed in belongs to that user, and so do the documents it adds. `GET /ingest/jobs` lists only your own jobs, and other users get `404` for them.
 
@@ -836,7 +836,7 @@ The drill uses real API and Chroma server processes on loopback, a local fake LL
 **Background indexing**
 
 - **Run again reads every file.** It skips embedding stored chunks, but loading and chunking a large collection again still takes time.
-- **Each replica has its own job queue**, so jobs on different replicas run at the same time. Cancelling only works on the replica running the job.
+- **Each replica has its own job queue** unless `RAG_INGEST_QUEUE=kafka`, so jobs on different replicas run at the same time. Cancelling only works on the replica that queued the job, and with Kafka only if that replica is also the one running it.
 - **Scanned PDFs are not indexed.** They are reported as having no extractable text; there is no OCR.
 
 **Accounts**

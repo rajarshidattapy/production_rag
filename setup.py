@@ -21,6 +21,7 @@ setup(
         "numpy>=1.24.0",
         "openai>=1.0.0",
         "redis[hiredis]>=7.3,<9",
+        "confluent-kafka>=2.16.1,<3",
     ],
     extras_require={
         "anthropic": ["anthropic>=0.30.0"],

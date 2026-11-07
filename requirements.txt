@@ -23,6 +23,7 @@ anthropic>=2.1.0                    # Anthropic LLM backend
 # Utilities
 tqdm>=4.70.1                         # Progress bars
 redis[hiredis]>=7.3,<9               # Optional shared cache and rate-limit state
+confluent-kafka>=2.16.1,<3           # Optional ingest job queue (RAG_INGEST_QUEUE=kafka)
 
 # API service
 fastapi>=0.161.1                     # HTTP API layer

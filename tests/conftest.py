@@ -59,6 +59,22 @@ def fresh_login_limits() -> None:
 
 
 @pytest.fixture(autouse=True)
+def local_ingest_queue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never reach a real Kafka broker from a developer's .env, and undo an earlier shutdown."""
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "ingest_queue", "local")
+    api = sys.modules.get("src.api")
+    if api is not None:
+        from src.ingest_queue import LocalIngestQueue
+
+        if not isinstance(api._ingest_queue, LocalIngestQueue):
+            monkeypatch.setattr(api, "_ingest_queue", LocalIngestQueue(api._run_queued_ingest_job))
+        # A test client used as a context manager runs the shutdown hook when it exits.
+        api._ingest_shutting_down.clear()
+
+
+@pytest.fixture(autouse=True)
 def no_real_follow_up_rewrites(monkeypatch: pytest.MonkeyPatch) -> None:
     """Never reach a real LLM from a developer's .env. Tests of rewriting patch this themselves."""
     from src.generation.generator import Generator
