@@ -310,6 +310,7 @@ class TestScope:
         with patch.object(pipeline.generator, "generate_async", side_effect=leaky):
             result = await _call(client, "ask_knowledge_base", question="parking contact")
         assert "alice@example.com" not in result["answer"]
+        assert result["grounded"] and result["citations"]
         assert all("alice@example.com" not in c["snippet"] for c in result["citations"])
 
 
