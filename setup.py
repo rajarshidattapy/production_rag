@@ -21,6 +21,8 @@ setup(
         "numpy>=1.24.0",
         "openai>=1.0.0",
         "redis[hiredis]>=7.3,<9",
+        "celery[redis]>=5.6,<6",
+        "filelock>=3.20",
     ],
     extras_require={
         "anthropic": ["anthropic>=0.30.0"],

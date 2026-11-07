@@ -23,6 +23,8 @@ anthropic>=2.1.0                    # Anthropic LLM backend
 # Utilities
 tqdm>=4.70.1                         # Progress bars
 redis[hiredis]>=7.3,<9               # Optional shared cache and rate-limit state
+celery[redis]>=5.6,<6                 # Optional replica-safe background indexing queue
+filelock>=3.20                        # Cross-process ingest job status updates
 
 # API service
 fastapi>=0.161.1                     # HTTP API layer

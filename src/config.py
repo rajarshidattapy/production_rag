@@ -48,6 +48,17 @@ class Settings(BaseSettings):
     redis_socket_timeout_seconds: float = Field(default=0.5, gt=0)
     redis_embedding_cache_ttl_seconds: int = Field(default=86_400, ge=60)
 
+    # ---------- Background indexing ----------
+    # A single-process install needs no broker: its one-thread queue is cheaper and keeps
+    # indexing serialized. Celery is opt-in for replicas that need one shared queue and a
+    # worker whose lifetime is independent from the API processes.
+    ingest_queue: Literal["local", "celery"] = "local"
+    celery_broker_url: str = Field(default="redis://127.0.0.1:6379/0", repr=False)
+    celery_task_queue: str = "rag-ingest"
+    # Redis makes an unacknowledged task visible again after this interval. Large CPU-only
+    # indexes can take many hours, so keep it above the expected longest indexing job.
+    celery_visibility_timeout_seconds: int = Field(default=259_200, ge=60)
+
     # ---------- Chunking ----------
     chunk_size: int = 800
     chunk_overlap: int = 150
