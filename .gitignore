@@ -20,7 +20,10 @@ data/eval_results/
 .venv/
 venv/
 env/
-data/
+# Runtime data stays local; the evaluation dataset, its baseline, and sample docs are tracked.
+data/*
+!data/golden_dataset/
+!data/sample_docs/
 
 # IDE
 .vscode/

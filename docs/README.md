@@ -179,6 +179,29 @@ Each chunk records the settings it was screened with in `screening`. After chang
 
 The patterns are signals, not verdicts: they miss instructions they don't describe.
 
+### Retrieval quality
+
+`scripts/evaluate_retrieval.py` scores retrieval without calling an LLM. It indexes a corpus into a throwaway store, runs every golden-dataset question, and treats a chunk as relevant when it comes from one of the question's `expected_sources`, so labels survive re-chunking. It reports Recall@K, Precision@K, MRR, NDCG@K, and hit rate for vector, hybrid, and hybrid-plus-reranker retrieval.
+
+```bash
+python -m scripts.evaluate_retrieval --modes vector,hybrid,hybrid_reranked     # check
+python -m scripts.evaluate_retrieval --modes vector,hybrid,hybrid_reranked --update-baseline
+python -m scripts.evaluate_retrieval --calibrate                               # tune weights
+```
+
+- **Regression check:** compares against `data/golden_dataset/retrieval_baseline.json` and exits `1` if any metric drops by more than `--tolerance` (0.02). It refuses to compare (exit `2`) when the dataset, corpus, embedding model, chunk size, or K differ from the baseline's, because the scores wouldn't mean the same thing. CI runs it after the tests.
+- **Calibration:** sweeps `RAG_HYBRID_ALPHA` from 0 to 1 and `RAG_RRF_K` over 10, 30, 60, and 100, maximising `--metric` (NDCG by default). It suggests new settings only when they beat the current ones by `--min-gain` (0.01), and says how many questions got better and worse.
+
+On the bundled sample (4 documents, 14 questions, real models), K=5:
+
+| Mode | Recall | Precision | MRR | NDCG |
+| ---- | ------ | --------- | --- | ---- |
+| Vector | 1.00 | 0.46 | 0.96 | 0.65 |
+| Hybrid (alpha 0.6) | 1.00 | 0.57 | 1.00 | 0.77 |
+| Hybrid + reranker | 1.00 | 0.63 | 1.00 | 0.85 |
+
+Calibration on that sample favours keywords: alpha 0.1 reaches NDCG 0.90, better on 11 questions and worse on none. The default stays at 0.6, because the sample's questions reuse the documents' own words, which suits BM25. Run calibration on a representative sample of real questions and documents (`--dataset`, `--corpus`) before changing it.
+
 ### Start-up and load testing
 
 **Warm-up.** Before the server accepts a request, it loads and runs the embedding model, the language detector, and the reranker, then opens each language's search index, logging how long each took. A model that can't load stops the server from starting, so a broken image fails at deploy time rather than on the first question. If Chroma is still starting, the indexes are built on first use instead. `RAG_WARM_UP_ON_START=false` skips it, and `RAG_WARM_UP_RERANKER=false` leaves the reranker unloaded to save memory. `/readyz` reports ready only once models are loaded, Chroma answers, and the indexes are open.
@@ -296,7 +319,7 @@ Citation support is a word-overlap heuristic, so it can catch a misattributed ci
 - **Context Budget** — `RAG_MAX_CONTEXT_CHARS` (default 12000) caps the context sent to the LLM as a cost guardrail. Passages past the budget are dropped, and the last one that fits is cut at the character limit, which can be mid-sentence.
 - **Security Hardening** — Path-traversal guards on `/ingest`, BM25 index stored as plain integer arrays loaded with `allow_pickle=False` (no pickle), 0o600 file permissions on data files, `re.escape()` on pricing pattern matching to prevent ReDoS.
 - **Docker Multi-Stage Build** — `deps → model-cache → runtime` stages; non-root user, with the default embedding and reranker models cached in the image. The image and compose stack have not been run end to end yet; see [known gaps](#known-gaps-to-close-before-production).
-- **Tests and CI** — 718 unit, integration, and stress tests (LLM calls mocked; no API keys needed). GitHub Actions workflows cover CI, the evaluation gate (skipped when the `OPENAI_API_KEY` secret is absent), and GHCR publish on every push to `master`.
+- **Tests and CI** — 735 unit, integration, and stress tests (LLM calls mocked; no API keys needed). GitHub Actions workflows cover CI, the evaluation gate (skipped when the `OPENAI_API_KEY` secret is absent), and GHCR publish on every push to `master`.
 
 ---
 

@@ -56,11 +56,6 @@
 - **Context Compression:** Remove redundant passages and compress retrieved evidence while preserving information needed to answer accurately.
 - **Fine-Grained Authorization:** Enforce document-, collection-, and role-level permissions during retrieval, not merely at the API endpoint. Chunks and parents now carry `collection`, `restricted`, and `roles`, set per folder with `RAG_SOURCE_COLLECTIONS` and `RAG_SOURCE_ROLES`; users don't have roles yet, and retrieval doesn't filter on them.
 
-**Measuring quality**
-
-- **Adaptive Search Weight Calibration:** Tune BM25 and vector search weights against a representative evaluation dataset instead of relying on fixed defaults.
-- **Retrieval Regression Testing:** Track Recall@K, Precision@K, MRR, and NDCG to detect retrieval-quality regressions after code or model changes.
-
 ### Stage 3: Generation
 
 *Mostly `src/generation/`.*

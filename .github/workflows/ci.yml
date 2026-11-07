@@ -52,3 +52,33 @@ jobs:
         with:
           files: ./coverage.xml
           fail_ci_if_error: false
+
+  retrieval-quality:
+    name: Retrieval regression
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -e .
+
+      # The real embedding and reranker models, so they aren't downloaded on every run.
+      - name: Cache models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-models-${{ hashFiles('src/config.py') }}
+
+      # Fails on a drop beyond the tolerance against data/golden_dataset/retrieval_baseline.json.
+      # The wider tolerance allows for small numeric differences between machines.
+      - name: Check retrieval quality against the baseline
+        run: python -m scripts.evaluate_retrieval --modes vector,hybrid,hybrid_reranked --tolerance 0.05

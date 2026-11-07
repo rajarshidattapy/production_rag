@@ -1,0 +1,32 @@
+{
+  "identity": {
+    "dataset": "460d0a899b07c7db",
+    "corpus": "890407e1313e3661",
+    "embedding_model": "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+    "chunk_size": 800,
+    "k": 5
+  },
+  "results": {
+    "vector": {
+      "recall": 1.0,
+      "precision": 0.4571,
+      "mrr": 0.9643,
+      "ndcg": 0.6493,
+      "hit_rate": 1.0
+    },
+    "hybrid": {
+      "recall": 1.0,
+      "precision": 0.5714,
+      "mrr": 1.0,
+      "ndcg": 0.7747,
+      "hit_rate": 1.0
+    },
+    "hybrid_reranked": {
+      "recall": 1.0,
+      "precision": 0.6286,
+      "mrr": 1.0,
+      "ndcg": 0.8453,
+      "hit_rate": 1.0
+    }
+  }
+}
