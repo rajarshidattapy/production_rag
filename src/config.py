@@ -46,6 +46,17 @@ class Settings(BaseSettings):
     redis_socket_timeout_seconds: float = Field(default=0.5, gt=0)
     redis_embedding_cache_ttl_seconds: int = Field(default=86_400, ge=60)
 
+    # ---------- Async ingest job queue ----------
+    # "local" keeps waiting jobs in this process. "kafka" keeps them on a topic, so they
+    # survive a restart and replicas share one queue. The topic must have one partition.
+    ingest_queue: Literal["local", "kafka"] = "local"
+    kafka_bootstrap_servers: str = "127.0.0.1:9092"
+    kafka_ingest_topic: str = "rag.ingest-jobs"
+    kafka_consumer_group: str = "rag-ingest"
+    kafka_timeout_seconds: float = Field(default=10.0, gt=0)
+    # Extra librdkafka settings as JSON, e.g. {"security.protocol": "SASL_SSL", ...}.
+    kafka_client_config: dict[str, str] = Field(default_factory=dict, repr=False)
+
     # ---------- Chunking ----------
     chunk_size: int = 800
     chunk_overlap: int = 150

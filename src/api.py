@@ -20,7 +20,6 @@ import time
 import uuid
 from collections import OrderedDict
 from collections.abc import AsyncGenerator, AsyncIterator
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -43,6 +42,7 @@ from src.chat.store import AccountLockedError, ChatStore, User, UsernameTakenErr
 from src.config import settings as _settings
 from src.generation.citations import CitationFormatter
 from src.healing.metrics import HEALING_REGISTRY
+from src.ingest_queue import QueueUnavailableError, build_ingest_queue
 from src.ingestion import screening
 from src.pipeline import SHARED_OWNER, IngestProgress, RAGPipeline, retrieval_owners
 from src.retrieval.vector_store import VectorStoreUnavailableError
@@ -121,10 +121,13 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # The server accepts no request until this returns.
     if _settings.warm_up_on_start:
         await asyncio.to_thread(_warm_up)
+    _ingest_shutting_down.clear()
+    _ingest_queue.start()
     try:
         yield
     finally:
         _interrupt_active_ingest_jobs()
+        await asyncio.to_thread(_ingest_queue.close, _INGEST_SHUTDOWN_SECONDS)
         close_redis_clients()
 
 
@@ -550,6 +553,10 @@ def _warm_up() -> None:
             start = time.perf_counter()
             get_redis_client(_settings.redis_url, _settings.redis_socket_timeout_seconds).ping()
             timings["redis"] = time.perf_counter() - start
+        if _settings.ingest_queue == "kafka":
+            start = time.perf_counter()
+            _ingest_queue.ping()
+            timings["kafka"] = time.perf_counter() - start
     except Exception:
         logger.exception("A model or configured shared-state dependency failed to initialize")
         raise
@@ -569,6 +576,7 @@ def readyz() -> HealthResponse:
             _warm_up_models()
         if _settings.redis_url:
             get_redis_client(_settings.redis_url, _settings.redis_socket_timeout_seconds).ping()
+        _ingest_queue.ping()
         pipeline = get_pipeline()
         for lang in ["en", "de", "es"]:
             # Objects built by an earlier call are cached, so ask the database directly.
@@ -748,12 +756,11 @@ async def ingest(request: IngestRequest, rag_session: str | None = Cookie(None))
 # ---------------------------------------------------------------------------
 _INGEST_JOBS_MAX = 500
 _ingest_jobs: OrderedDict[str, dict[str, Any]] = OrderedDict()
-# One at a time, in order: indexing is CPU-bound, so parallel jobs would only slow each other,
-# and a job with reset=True must not run underneath another job.
-_ingest_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rag-ingest")
 # Stop signal for each job this process hasn't finished yet.
 _active_ingest_jobs: dict[str, threading.Event] = {}
 _ingest_jobs_shut_down: set[str] = set()
+# Set at shutdown, so a job that starts after it stops at once instead of holding up exit.
+_ingest_shutting_down = threading.Event()
 # Identifies this process, so a job left unfinished by a previous one can be recognised.
 _INSTANCE_ID = uuid.uuid4().hex
 _ingest_jobs_file_lock = threading.Lock()
@@ -765,6 +772,8 @@ _UNFINISHED_JOB_STATUSES = {"pending", "running"}
 # Past this many documents a chat records a count, not every filename.
 _MAX_CHAT_FILE_NAMES = 20
 _UPLOAD_PREFIX_RE = re.compile(r"^[0-9a-f]{32}_")
+# How long shutdown waits for the running job to stop after its current batch.
+_INGEST_SHUTDOWN_SECONDS = 30.0
 
 
 def _ingest_jobs_path() -> Path:
@@ -811,15 +820,34 @@ def _record_ingest_job(job_id: str, *, persist: bool = True, **fields: Any) -> N
         _persist_ingest_job(job_id, record)
 
 
+def _latest_ingest_job(
+    in_memory: dict[str, Any] | None, persisted: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """Pick the more current record. With Kafka, a job queued here may run on another replica,
+    which leaves this process's copy at "pending" and reports through the status file."""
+    if in_memory is None or persisted is None:
+        return in_memory or persisted
+    if _settings.ingest_queue == "kafka" and in_memory.get("status") == "pending":
+        return persisted
+    return in_memory
+
+
 def _find_ingest_job(job_id: str) -> dict[str, Any] | None:
     with _ingest_jobs_lock:
         job = _ingest_jobs.get(job_id)
-    return job or _read_persisted_ingest_jobs().get(job_id)
+    if job is not None and (_settings.ingest_queue == "local" or job.get("status") != "pending"):
+        return job
+    return _latest_ingest_job(job, _read_persisted_ingest_jobs().get(job_id))
 
 
 def _ingest_job_view(job_id: str, job: dict[str, Any]) -> IngestJobStatusResponse:
     """A job as clients see it: internal fields dropped, and orphaned work called what it is."""
-    if job.get("status") in _UNFINISHED_JOB_STATUSES and job.get("owner") != _INSTANCE_ID:
+    # With Kafka, unfinished work isn't orphaned: the queue delivers it again.
+    if (
+        _settings.ingest_queue == "local"
+        and job.get("status") in _UNFINISHED_JOB_STATUSES
+        and job.get("owner") != _INSTANCE_ID
+    ):
         job = {
             **job,
             "status": "interrupted",
@@ -881,8 +909,13 @@ def _note_ingest_result_in_chat(job_id: str, status: str, progress: IngestProgre
         logger.exception("Could not note ingest job %s in its chat", job_id)
 
 
-def _run_ingest_job(job_id: str, source_path: Path, reset: bool, owner: str | None) -> None:
-    stop = _active_ingest_jobs[job_id]
+def _run_ingest_job(job_id: str, source_path: Path, reset: bool, owner: str | None) -> str:
+    """Run one job and return how it ended."""
+    # A job enqueued by another process, or before a restart, has no stop signal here yet.
+    stop = _active_ingest_jobs.setdefault(job_id, threading.Event())
+    if _ingest_shutting_down.is_set():
+        _ingest_jobs_shut_down.add(job_id)
+        stop.set()
     latest = IngestProgress()
     last_saved = 0.0
 
@@ -899,11 +932,12 @@ def _run_ingest_job(job_id: str, source_path: Path, reset: bool, owner: str | No
         return "interrupted" if job_id in _ingest_jobs_shut_down else "cancelled"
 
     try:
-        if stop.is_set():  # cancelled while waiting its turn
-            status = stopped_status()
+        # Cancelled while waiting its turn, possibly through another replica.
+        if stop.is_set() or (_find_ingest_job(job_id) or {}).get("cancel_requested"):
+            status = "cancelled" if not stop.is_set() else stopped_status()
             _note_ingest_result_in_chat(job_id, status, latest)
             _record_ingest_job(job_id, status=status)
-            return
+            return status
 
         _record_ingest_job(job_id, status="running")
         pipeline = get_pipeline()
@@ -922,30 +956,77 @@ def _run_ingest_job(job_id: str, source_path: Path, reset: bool, owner: str | No
             total_chunks=total_chunks,
             **{**_progress_fields(latest), "chunks_ingested": chunks_ingested},
         )
+        return status
     except Exception as exc:
         logger.warning("Ingest job %s failed: %s", job_id, exc)
         _note_ingest_result_in_chat(job_id, "failed", latest)
         _record_ingest_job(job_id, status="failed", error=str(exc), **_progress_fields(latest))
+        return "failed"
     finally:
         _active_ingest_jobs.pop(job_id, None)
         _ingest_jobs_shut_down.discard(job_id)
 
 
+def _run_queued_ingest_job(message: dict[str, Any]) -> str:
+    job_id = message["job_id"]
+    with _ingest_jobs_lock:
+        known = job_id in _ingest_jobs
+    if not known:
+        # Picked up after a restart or from another replica: restore who it belongs to and
+        # where it reports, plus any progress the status file has, before it records anything.
+        _record_ingest_job(
+            job_id, persist=False, **{**message["record"], **(_find_ingest_job(job_id) or {})}
+        )
+    source = message["record"]["source"]
+    try:
+        source_path = _resolve_ingest_source(source)
+    except HTTPException as exc:  # the file went away while the job waited
+        _record_ingest_job(job_id, status="failed", error=str(exc.detail))
+        _active_ingest_jobs.pop(job_id, None)
+        return "failed"
+    status = _run_ingest_job(
+        job_id, source_path, message["reset"], message["record"].get("user_id")
+    )
+    if status == "interrupted" and _settings.ingest_queue == "kafka":
+        # Left on the topic, so it runs again once a server is back. Offering "Run again"
+        # as well would index it twice.
+        _record_ingest_job(job_id, status="pending")
+    return status
+
+
+# One at a time, in order: indexing is CPU-bound, so parallel jobs would only slow each other,
+# and a job with reset=True must not run underneath another job.
+_ingest_queue = build_ingest_queue(_settings, _run_queued_ingest_job)
+
+
 def _enqueue_ingest_job(source_path: Path, reset: bool = False, **fields: Any) -> str:
     job_id = str(uuid.uuid4())
-    _active_ingest_jobs[job_id] = threading.Event()
-    _record_ingest_job(
-        job_id, status="pending", source=str(source_path), created_at=time.time(), **fields
-    )
-    _ingest_worker.submit(_run_ingest_job, job_id, source_path, reset, fields.get("user_id"))
+    record = {"status": "pending", "source": str(source_path), "created_at": time.time(), **fields}
+    _record_ingest_job(job_id, **record)
+    try:
+        _ingest_queue.submit({"job_id": job_id, "reset": reset, "record": record})
+    except QueueUnavailableError as exc:
+        logger.warning("Could not queue ingest job %s: %s", job_id, exc)
+        _record_ingest_job(job_id, status="failed", error="The job queue is unavailable.")
+        raise HTTPException(
+            status_code=503, detail="The job queue is unavailable. Try again shortly."
+        ) from exc
     return job_id
 
 
 def _interrupt_active_ingest_jobs() -> None:
     """Called at shutdown: stop promptly, so exit doesn't wait for a long job to finish."""
+    _ingest_shutting_down.set()
     for job_id, stop in list(_active_ingest_jobs.items()):
         _ingest_jobs_shut_down.add(job_id)
         stop.set()
+
+
+def _can_cancel_here(job_id: str, job: dict[str, Any]) -> bool:
+    if job.get("status") == "pending":
+        # A local job waits only in the process that queued it; a Kafka job waits on the topic.
+        return _settings.ingest_queue == "kafka" or job.get("owner") == _INSTANCE_ID
+    return job.get("status") == "running" and job_id in _active_ingest_jobs
 
 
 def _user_for_session(rag_session: str | None) -> User | None:
@@ -1013,11 +1094,13 @@ def cancel_ingest_job(
 ) -> IngestJobStatusResponse:
     """Stop a job after its current batch. Text already indexed stays searchable."""
     job = _job_for_requester(job_id, rag_session)
-    stop = _active_ingest_jobs.get(job_id)
-    if stop is None or job.get("status") not in _UNFINISHED_JOB_STATUSES:
+    if not _can_cancel_here(job_id, job):
         raise HTTPException(status_code=409, detail="This job is not running on this server.")
-    stop.set()
+    # A waiting job checks the request when its turn comes, wherever it runs.
     _record_ingest_job(job_id, cancel_requested=True)
+    stop = _active_ingest_jobs.get(job_id)
+    if stop is not None:
+        stop.set()
     return _ingest_job_view(job_id, {**job, "cancel_requested": True})
 
 
@@ -1320,9 +1403,14 @@ def me(user: User = _signed_in) -> AccountResponse:
 @app.get("/ingest/jobs", response_model=list[IngestJobStatusResponse], dependencies=[_auth])
 def list_ingest_jobs(user: User = _signed_in) -> list[IngestJobStatusResponse]:
     """List your most recent ingest jobs, newest first, including any cut off by a restart."""
+    persisted = _read_persisted_ingest_jobs()
     with _ingest_jobs_lock:
-        jobs = {**_read_persisted_ingest_jobs(), **_ingest_jobs}
-    mine = [(i, j) for i, j in jobs.items() if j.get("user_id") == user.id]
+        in_memory = dict(_ingest_jobs)
+    jobs = {
+        i: _latest_ingest_job(in_memory.get(i), persisted.get(i))
+        for i in {**persisted, **in_memory}
+    }
+    mine = [(i, j) for i, j in jobs.items() if j is not None and j.get("user_id") == user.id]
     mine.sort(key=lambda item: item[1].get("created_at") or 0, reverse=True)
     return [_ingest_job_view(i, j) for i, j in mine[:50]]
 

@@ -11,6 +11,38 @@ services:
       timeout: 5s
       retries: 5
 
+  # Optional ingest job queue. Start with `docker compose --profile kafka up` and set
+  # RAG_INGEST_QUEUE=kafka. Single-node KRaft; like Redis, not published to the host.
+  kafka:
+    image: apache/kafka:4.3.2
+    container_name: rag-kafka
+    profiles: ["kafka"]
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Ingest jobs need a single-partition topic; the app creates it, this covers auto-create.
+      KAFKA_NUM_PARTITIONS: 1
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      # Waiting jobs must survive a broker restart, so the log is kept on a volume.
+      - kafka_data:/var/lib/kafka/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
   chroma:
     image: chromadb/chroma:1.5.9
     container_name: rag-chromadb
@@ -48,6 +80,8 @@ services:
       - RAG_CHROMA_HOST=chroma
       - RAG_CHROMA_PORT=8000
       - RAG_REDIS_URL=redis://redis:6379/0
+      - RAG_INGEST_QUEUE=${RAG_INGEST_QUEUE:-local}
+      - RAG_KAFKA_BOOTSTRAP_SERVERS=kafka:9092
       - RAG_LLM_PROVIDER=${RAG_LLM_PROVIDER:-openai}
       - RAG_LLM_MODEL=${RAG_LLM_MODEL:-gpt-4o-mini}
       - RAG_OPENROUTER_MODE=${RAG_OPENROUTER_MODE:-auto}
@@ -69,6 +103,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      kafka:
+        condition: service_healthy
+        required: false # only when the kafka profile is enabled
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8000/healthz || exit 1"]
@@ -79,3 +116,4 @@ services:
 
 volumes:
   chroma_data:
+  kafka_data:

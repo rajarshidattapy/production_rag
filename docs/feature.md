@@ -19,11 +19,11 @@
 
 - **Embedding is the bottleneck.** PyTorch is pinned to one thread, so a million chunks would take about 70 hours. Use a GPU or more threads for the indexing worker. *Measured at about 4 chunks per second; the 70 hours is extrapolated.*
 - **Batch size needs revisiting with faster embedding.** Small batches add overhead that the slow CPU model hides. *Measured: 551 s vs 360 s for 40,000 chunks with stub embeddings.*
-- **Indexing runs inside the API process.** It competes with queries for CPU, a deploy interrupts it, and each replica has its own queue, where one big job makes everyone else's wait. Needs a separate worker service with a shared queue and per-user fairness. *From the code.*
+- **Indexing runs inside the API process.** It competes with queries for CPU, and one big job makes everyone else's wait. With `RAG_INGEST_QUEUE=kafka` the queue is shared and waiting or interrupted jobs survive a deploy, but jobs still run one at a time across all replicas, with no per-user fairness. Needs a separate worker service consuming the topic, and fairness per user. *From the code.*
 - **Run again re-reads every file.** Track finished files by content hash so a resume skips them. *From the code.*
 - **Idempotent Ingestion Jobs:** Prevent duplicate job submissions from creating repeated or inconsistent document indexing operations.
 - **Dead-Letter Job Handling:** Preserve failed ingestion jobs for inspection, diagnosis, and controlled reprocessing.
-- **Job status is a whole file, read on every poll** and rewritten on every save, holding up to 500 jobs. Move it to the database. *From the code.*
+- **Job status is a whole file, read on every poll** and rewritten on every save, holding up to 500 jobs. With the Kafka queue, replicas report jobs to each other through this file, so they only see each other's progress on a shared `RAG_DATA_DIR`, and a job whose replica crashed still shows `running` until Kafka redelivers it. Move it to the database. *From the code.*
 
 ### Stage 2: Retrieval
 
