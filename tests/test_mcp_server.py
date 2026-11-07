@@ -240,7 +240,7 @@ class TestTools:
         assert info["chunks"] == sum(d["chunks"] for d in listed["documents"])
         assert info["chunks"] < pipeline.stats()["chunks_in_store"]
         assert info["embedding_model"] == pipeline.config.embedding_model
-        assert "key" not in " ".join(info).lower()
+        assert "secret-key" not in json.dumps(info).lower()
 
 
 class TestScope:
