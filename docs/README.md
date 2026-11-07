@@ -776,7 +776,7 @@ docker compose up --build
 
 This starts the API, a private Chroma server, and a private ephemeral Redis instance. Redis shares query embeddings and authentication-attempt limits across API replicas; it does not cache generated answers or hold durable application data. Direct runs keep the original in-memory behavior unless `RAG_REDIS_URL` is set. For agents, set `RAG_MCP_ENABLED=true` and `RAG_MCP_ALLOWED_HOSTS` to serve the read-only [MCP server](#mcp-server) at `/mcp`. Compose reads the `RAG_LLM_*`, `RAG_API_KEY`, `RAG_CORS_ORIGINS`, `MONITOR_ENABLED`, and provider key values from your `.env` for substitution. On Linux hosts, `./data` must be writable by UID 1001, the user the API runs as.
 
-For API replicas, put `RAG_INGEST_QUEUE=celery` in `.env` and start the opt-in profile:
+For API replicas, use a Compose override or another orchestrator to remove the fixed container name and host-port mapping, set `RAG_INGEST_QUEUE=celery` in `.env`, and start this profile:
 
 ```bash
 docker compose --profile celery up --build
