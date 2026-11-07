@@ -23,7 +23,8 @@ def celery_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     api._active_ingest_jobs.clear()
 
 
-def test_default_queue_needs_no_broker() -> None:
+def test_default_queue_needs_no_broker(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RAG_INGEST_QUEUE", raising=False)
     from src.config import Settings
 
     configured = Settings(_env_file=None)
