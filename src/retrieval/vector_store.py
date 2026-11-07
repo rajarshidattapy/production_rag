@@ -428,6 +428,8 @@ class VectorStore:
             offset += len(page)
 
     def iter_metadata(self, where: dict[str, Any] | None = None, page_size: int = 5000):
+        if page_size <= 0:
+            raise ValueError("page_size must be positive")
         """Yield the metadata of every chunk matching ``where``, in pages, without the text."""
         offset = 0
         while True:
