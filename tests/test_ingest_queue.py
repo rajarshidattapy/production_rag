@@ -104,7 +104,7 @@ def test_consumer_acknowledges_completion_and_requeues_interruption(
     channel.basic_qos.assert_called_once_with(prefetch_count=1)
 
 
-def test_job_store_merge_does_not_lose_concurrent_cancel(tmp_path) -> None:
+def test_job_store_merge_preserves_cancel_flag(tmp_path) -> None:
     store = IngestJobStore(tmp_path / "app.db")
     store.put("job-1", status="running", source="docs")
     store.put("job-1", cancel_requested=True)
