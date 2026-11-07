@@ -229,6 +229,10 @@ class RAGPipeline:
             chroma_host=self.config.chroma_host,
             chroma_port=self.config.chroma_port,
             embedding_query_cache_size=self.config.embedding_query_cache_size,
+            redis_url=self.config.redis_url,
+            redis_key_prefix=self.config.redis_key_prefix,
+            redis_socket_timeout_seconds=self.config.redis_socket_timeout_seconds,
+            redis_embedding_cache_ttl_seconds=self.config.redis_embedding_cache_ttl_seconds,
             hnsw_ef_search=self.config.hnsw_ef_search,
             hnsw_max_neighbors=self.config.hnsw_max_neighbors,
             hnsw_ef_construction=self.config.hnsw_ef_construction,
@@ -317,7 +321,10 @@ class RAGPipeline:
                 parents, chunks = self.chunker.chunk_with_parents(document)
                 parents, chunks, excluded = self._flag_and_exclude(parents, chunks, name)
                 annotate_content_fingerprints([*parents, *chunks])
-                chunks = self._deduplicate_chunks(chunks, seen_fingerprints)
+                chunk_languages = {id(chunk): _detect_language(chunk.content) for chunk in chunks}
+                chunks = self._deduplicate_chunks(
+                    chunks, seen_fingerprints, chunk_languages=chunk_languages
+                )
                 kept_parent_ids = {str(chunk.metadata["parent_id"]) for chunk in chunks}
                 parents = [parent for parent in parents if parent.chunk_id in kept_parent_ids]
             except Exception as exc:
@@ -335,7 +342,7 @@ class RAGPipeline:
                     )
                 pending_parents.extend(parents)
                 for chunk in chunks:
-                    pending.setdefault(_detect_language(chunk.content), []).append(chunk)
+                    pending.setdefault(chunk_languages[id(chunk)], []).append(chunk)
                 self._store_pending(
                     pending, pending_parents, progress, report, _INGEST_STEP_CHUNKS, stop
                 )
@@ -549,7 +556,11 @@ class RAGPipeline:
         return count
 
     def _deduplicate_chunks(
-        self, chunks: list[Chunk], seen_fingerprints: set[tuple[str, str]]
+        self,
+        chunks: list[Chunk],
+        seen_fingerprints: set[tuple[str, str]],
+        *,
+        chunk_languages: dict[int, str] | None = None,
     ) -> list[Chunk]:
         """Remove exact and near-duplicate chunks from other documents before indexing.
 
@@ -568,7 +579,12 @@ class RAGPipeline:
                 exact_removed += 1
                 continue
             seen_fingerprints.add(identity)
-            grouped.setdefault((_detect_language(chunk.content), owner), []).append(chunk)
+            language = (
+                chunk_languages[id(chunk)]
+                if chunk_languages is not None
+                else _detect_language(chunk.content)
+            )
+            grouped.setdefault((language, owner), []).append(chunk)
 
         for (language, owner), candidates in grouped.items():
             store = self._get_vector_store(language)
@@ -577,14 +593,26 @@ class RAGPipeline:
                 {"$and": [{"owner": owner}, {"content_fingerprint": {"$in": fingerprints}}]}
             )
             existing = store.get_chunks(sorted(existing_ids)) if existing_ids else []
-            known_fingerprints = {
-                str(row["metadata"].get("content_fingerprint")) for row in existing
-            }
-            fresh = [
-                chunk
-                for chunk in candidates
-                if str(chunk.metadata["content_fingerprint"]) not in known_fingerprints
-            ]
+            documents_by_fingerprint: dict[str, set[str]] = {}
+            for row in existing:
+                metadata = row["metadata"]
+                fingerprint = str(metadata.get("content_fingerprint"))
+                documents_by_fingerprint.setdefault(fingerprint, set()).add(
+                    str(metadata.get("document_key"))
+                )
+            fresh = []
+            for chunk in candidates:
+                fingerprint = str(chunk.metadata["content_fingerprint"])
+                matching_documents = documents_by_fingerprint.get(fingerprint, set())
+                # Keep a same-document retry: deterministic chunk IDs make _store_chunks skip
+                # its existing records, while ingestion progress still counts the file. Only a
+                # copy from another logical document is a duplicate to suppress here.
+                if (
+                    matching_documents
+                    and str(chunk.metadata.get("document_key")) not in matching_documents
+                ):
+                    continue
+                fresh.append(chunk)
             exact_removed += len(candidates) - len(fresh)
             if not fresh or not self.config.semantic_deduplication:
                 retained.extend(fresh)

@@ -20,6 +20,7 @@ from chromadb.config import Settings as ChromaSettings
 from chromadb.errors import InternalError, NotFoundError
 
 from src.ingestion.chunker import Chunk
+from src.shared_state import RedisEmbeddingCache, get_redis_client
 from src.utils.retry import retry_with_backoff
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,10 @@ class VectorStore:
         chroma_host: str | None = None,
         chroma_port: int | None = None,
         embedding_query_cache_size: int = 256,
+        redis_url: str | None = None,
+        redis_key_prefix: str = "rag",
+        redis_socket_timeout_seconds: float = 0.5,
+        redis_embedding_cache_ttl_seconds: int = 86_400,
         ingest_batch_size: int = 2000,
         hnsw_ef_search: int = 200,
         hnsw_max_neighbors: int = 16,
@@ -97,8 +102,18 @@ class VectorStore:
         self.hnsw_ef_construction = hnsw_ef_construction
 
         # Lazy-load embedding function
+        shared_cache = None
+        if redis_url and embedding_query_cache_size > 0:
+            shared_cache = RedisEmbeddingCache(
+                get_redis_client(redis_url, redis_socket_timeout_seconds),
+                redis_key_prefix,
+                embedding_model,
+                redis_embedding_cache_ttl_seconds,
+            )
         self._embedding_fn = _ChromaEmbeddingFunction(
-            model_name=embedding_model, query_cache_size=embedding_query_cache_size
+            model_name=embedding_model,
+            query_cache_size=embedding_query_cache_size,
+            shared_cache=shared_cache,
         )
 
         # Initialise ChromaDB client
@@ -548,13 +563,20 @@ class _ChromaEmbeddingFunction:
     VectorStore instances (e.g. per language) don't duplicate model memory.
     """
 
-    def __init__(self, model_name: str, query_cache_size: int = 256) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        query_cache_size: int = 256,
+        shared_cache: RedisEmbeddingCache | None = None,
+    ) -> None:
         self.model_name = model_name
         self._model: Any = None
         self._query_cache_size = query_cache_size
+        self._shared_cache = shared_cache
         self._query_cache: OrderedDict[str, list[float]] = OrderedDict()
         self._cache_hits = 0
         self._cache_misses = 0
+        self._cache_lock = threading.Lock()
 
     # ChromaDB >= 0.6 calls these methods to detect the embedding function's
     # capabilities and bypass the "legacy" serialization code path.
@@ -628,33 +650,53 @@ class _ChromaEmbeddingFunction:
         misses: list[tuple[int, str]] = []
 
         for i, text in enumerate(input):
-            cached = self._query_cache.get(text)
+            with self._cache_lock:
+                cached = self._query_cache.get(text)
+                if cached is not None:
+                    self._query_cache.move_to_end(text)
             if cached is not None:
-                self._query_cache.move_to_end(text)
-                self._cache_hits += 1
+                with self._cache_lock:
+                    self._cache_hits += 1
                 results[i] = cached
-            else:
-                misses.append((i, text))
+                continue
+
+            shared = self._shared_cache.get(text) if self._shared_cache is not None else None
+            if shared is not None:
+                with self._cache_lock:
+                    self._cache_hits += 1
+                    self._remember(text, shared)
+                results[i] = shared
+                continue
+            misses.append((i, text))
 
         if misses:
-            self._cache_misses += len(misses)
+            with self._cache_lock:
+                self._cache_misses += len(misses)
             embedded = self._encode([text for _, text in misses])
             for (i, text), vector in zip(misses, embedded, strict=True):
                 results[i] = vector
-                self._query_cache[text] = vector
-                self._query_cache.move_to_end(text)
-                if len(self._query_cache) > self._query_cache_size:
-                    self._query_cache.popitem(last=False)
+                if self._shared_cache is not None:
+                    self._shared_cache.set(text, vector)
+                with self._cache_lock:
+                    self._remember(text, vector)
 
         return self._as_arrays(results)  # type: ignore[arg-type]  # every slot filled above
 
+    def _remember(self, text: str, vector: list[float]) -> None:
+        """Update the local LRU while the caller holds ``_cache_lock``."""
+        self._query_cache[text] = vector
+        self._query_cache.move_to_end(text)
+        if len(self._query_cache) > self._query_cache_size:
+            self._query_cache.popitem(last=False)
+
     def cache_stats(self) -> dict[str, int]:
         """Return query-embedding cache hit/miss/current-size counters."""
-        return {
-            "hits": self._cache_hits,
-            "misses": self._cache_misses,
-            "size": len(self._query_cache),
-        }
+        with self._cache_lock:
+            return {
+                "hits": self._cache_hits,
+                "misses": self._cache_misses,
+                "size": len(self._query_cache),
+            }
 
     def embed_document(self, input: list[str]) -> list[np.ndarray]:
         """Embed documents for indexing (ChromaDB >= 0.5)."""

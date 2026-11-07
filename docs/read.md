@@ -7,10 +7,10 @@
 # Haven't scaled yet:
 
 1. **Grafana:** the built-in Observability dashboard covers a single server, so it only becomes necessary with several replicas.
-2. **Redis:** nothing needs a shared cache or shared state yet, because the app runs as one process with an in-memory query cache and no response cache.
-3. **Kafka:** there's no high-volume event stream or multiple consumers, only document jobs that a single in-process queue handles.
-4. **RabbitMQ:** background jobs run in a one-worker queue inside the API process, so it's only worth adding once indexing moves to separate worker services.
-5. Celery: Indexing is the only long-running job, and a one-worker thread queue handles it for now, so Celery's broker and separate workers aren't worth adding until we run replicas.
+2. **Kafka:** there's no high-volume event stream or multiple consumers, only document jobs that a single in-process queue handles.
+
+1. **RabbitMQ:** background jobs run in a one-worker queue inside the API process, so it's only worth adding once indexing moves to separate worker services.
+2. Celery: Indexing is the only long-running job, and a one-worker thread queue handles it for now, so Celery's broker and separate workers aren't worth adding until we run replicas.
 
 
 

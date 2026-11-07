@@ -31,7 +31,6 @@
 
 **Vector search**
 
-- **The query embedding cache isn't thread-safe.** Concurrent queries can raise `KeyError` once the cache is full, which fails the request. Needs a lock. *Reproduced: 2,086 errors with 8 threads and a small cache, with thread switching forced to be frequent.*
 - **Chroma is only tested to 50k chunks** on a single node, with its index in memory. Load test it at your target size, and move to Qdrant only if that shows Chroma is the bottleneck. *Measured at 50k; nothing larger has been run.*
 
 **Hybrid search (BM25)**
@@ -101,7 +100,6 @@
 
 - **Audit Logging:** Record security-sensitive actions such as uploads, queries, document modifications, deletions, and administrative operations without exposing sensitive content.
 - **Secrets Management:** Store API keys, database credentials, and encryption keys using a dedicated secrets manager instead of relying solely on environment variables.
-- **Login limits are counted per process**, so each replica allows its own 20 attempts. A shared store such as Redis, or limits at the proxy, would fix it. *From the code.*
 
 **Access for other tools**
 
@@ -123,7 +121,7 @@
 
 ## Final boss: Deploy
 
-The cheapest setup that works is **one VM running Docker Compose**: the API, Chroma, and Caddy for HTTPS, all on the same machine. Expect about $26 to$**30 a month plus your LLM bill**. This setup hasn't been run yet, so check everything on the first deploy.
+The cheapest setup that works is **one VM running Docker Compose**: the API, Chroma, Redis, and Caddy for HTTPS, all on the same machine. Expect about $26 to$**30 a month plus your LLM bill**. This setup hasn't been run yet, so check everything on the first deploy.
 
 ### What to use
 
@@ -134,10 +132,10 @@ The cheapest setup that works is **one VM running Docker Compose**: the API, Chr
 | Terraform                                                               | **Skip for now**                               | Creating one VM by hand takes minutes. Add it when you need to rebuild servers or run a second environment |
 | Ansible                                                                 | **Skip for now**                               | A short setup script covers one VM. Add it when you manage several servers                                 |
 | AWS or GCP                                                              | Only if a client requires it                   | Same stack, but they cost more for the same machine (see below)                                            |
-| SageMaker, Kubernetes, load balancer, managed databases, Grafana, Redis | **Skip**                                       | The LLM is an outside API and the local models run on CPU, so one VM needs none of these                   |
+| SageMaker, Kubernetes, load balancer, managed databases, Grafana        | **Skip**                                       | The LLM is an outside API and the local models run on CPU, so one VM needs none of these                   |
 
 
-4 GB is the starting point: the API alone peaked at about 1.2 to 1.4 GB while indexing (measured on Windows), and the reranker and Chroma are on top of that and not yet measured. Check real use with `docker stats`, and move to 8 GB if it gets tight, or if you use the reranker heavily.
+4 GB is the starting point: the API alone peaked at about 1.2 to 1.4 GB while indexing (measured on Windows), Redis is capped at 256 MB, and the reranker and Chroma are on top of that and not yet measured. Check real use with `docker stats`, and move to 8 GB if it gets tight, or if you use the reranker heavily.
 
 ### Monthly cost
 

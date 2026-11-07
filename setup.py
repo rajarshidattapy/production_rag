@@ -20,6 +20,7 @@ setup(
         "sentence-transformers>=2.2.0",
         "numpy>=1.24.0",
         "openai>=1.0.0",
+        "redis[hiredis]>=7.3,<9",
     ],
     extras_require={
         "anthropic": ["anthropic>=0.30.0"],

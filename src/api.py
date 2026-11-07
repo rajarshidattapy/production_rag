@@ -39,7 +39,6 @@ from prometheus_client import (
 from pydantic import BaseModel, Field
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from src.chat.rate_limit import AttemptLimiter
 from src.chat.store import AccountLockedError, ChatStore, User, UsernameTakenError
 from src.config import settings as _settings
 from src.generation.citations import CitationFormatter
@@ -47,6 +46,7 @@ from src.healing.metrics import HEALING_REGISTRY
 from src.ingestion import screening
 from src.pipeline import SHARED_OWNER, IngestProgress, RAGPipeline, retrieval_owners
 from src.retrieval.vector_store import VectorStoreUnavailableError
+from src.shared_state import build_attempt_limiter, close_redis_clients, get_redis_client
 from src.utils.i18n import _
 
 logger = logging.getLogger(__name__)
@@ -121,8 +121,11 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # The server accepts no request until this returns.
     if _settings.warm_up_on_start:
         await asyncio.to_thread(_warm_up)
-    yield
-    _interrupt_active_ingest_jobs()
+    try:
+        yield
+    finally:
+        _interrupt_active_ingest_jobs()
+        close_redis_clients()
 
 
 app = FastAPI(
@@ -543,8 +546,12 @@ def _warm_up() -> None:
     start = time.perf_counter()
     try:
         timings = _warm_up_models()
+        if _settings.redis_url:
+            start = time.perf_counter()
+            get_redis_client(_settings.redis_url, _settings.redis_socket_timeout_seconds).ping()
+            timings["redis"] = time.perf_counter() - start
     except Exception:
-        logger.exception("A model failed to load, so the server won't start")
+        logger.exception("A model or configured shared-state dependency failed to initialize")
         raise
     timings.update(_warm_up_search_indexes())
     logger.info(
@@ -560,6 +567,8 @@ def readyz() -> HealthResponse:
     try:
         if not _models_warm.is_set():
             _warm_up_models()
+        if _settings.redis_url:
+            get_redis_client(_settings.redis_url, _settings.redis_socket_timeout_seconds).ping()
         pipeline = get_pipeline()
         for lang in ["en", "de", "es"]:
             # Objects built by an earlier call are cached, so ask the database directly.
@@ -1135,7 +1144,9 @@ def get_chunk(chunk_id: str, rag_session: str | None = Cookie(None)) -> ChunkRes
 _SESSION_COOKIE = "rag_session"
 _chat_store: ChatStore | None = None
 _chat_store_lock = threading.Lock()
-_auth_limiter = AttemptLimiter()
+_auth_limiter = build_attempt_limiter(
+    _settings.redis_url, _settings.redis_key_prefix, _settings.redis_socket_timeout_seconds
+)
 
 
 def get_chat_store() -> ChatStore:

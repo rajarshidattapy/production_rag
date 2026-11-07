@@ -1,4 +1,16 @@
 services:
+  redis:
+    image: redis:7.2.17-alpine
+    container_name: rag-redis
+    command: redis-server --save "" --appendonly no --maxmemory 256mb --maxmemory-policy allkeys-lru
+    # Cache and rate-limit state is intentionally ephemeral and Redis is not published to the host.
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   chroma:
     image: chromadb/chroma:1.5.9
     container_name: rag-chromadb
@@ -35,6 +47,7 @@ services:
     environment:
       - RAG_CHROMA_HOST=chroma
       - RAG_CHROMA_PORT=8000
+      - RAG_REDIS_URL=redis://redis:6379/0
       - RAG_LLM_PROVIDER=${RAG_LLM_PROVIDER:-openai}
       - RAG_LLM_MODEL=${RAG_LLM_MODEL:-gpt-4o-mini}
       - RAG_OPENROUTER_MODE=${RAG_OPENROUTER_MODE:-auto}
@@ -53,6 +66,8 @@ services:
       - ./data:/app/data
     depends_on:
       chroma:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:

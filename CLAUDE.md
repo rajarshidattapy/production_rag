@@ -1,5 +1,9 @@
 # Project instructions
 
+## Keep `.env` synchronized
+
+Whenever `.env.example` is changed, update `.env` in the same change so every added, renamed, or removed setting is reflected locally. Preserve existing local values and secrets; add missing settings with an appropriate local/default value instead of replacing configured values.
+
 ## Keep `docs/feature.md` up to date
 
 `docs/feature.md` lists what still has to be fixed for production and for scale. Whenever your work on this repo reveals something that belongs there, add it in the same session, without being asked. This applies to every agent and subagent, whatever the task was.

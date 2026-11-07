@@ -39,6 +39,13 @@ class Settings(BaseSettings):
     # LRU cache size for repeated/paraphrased query embeddings (0 disables caching).
     embedding_query_cache_size: int = 256
 
+    # ---------- Optional shared state ----------
+    # When unset, the app remains self-contained and uses its in-process caches/limits.
+    redis_url: str | None = Field(default=None, repr=False)
+    redis_key_prefix: str = "rag"
+    redis_socket_timeout_seconds: float = Field(default=0.5, gt=0)
+    redis_embedding_cache_ttl_seconds: int = Field(default=86_400, ge=60)
+
     # ---------- Chunking ----------
     chunk_size: int = 800
     chunk_overlap: int = 150
