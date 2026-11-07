@@ -56,6 +56,8 @@ services:
       - RAG_ALLOW_STORE_RESET=${RAG_ALLOW_STORE_RESET:-false}
       - RAG_MCP_ENABLED=${RAG_MCP_ENABLED:-false}
       - RAG_MCP_ALLOWED_HOSTS=${RAG_MCP_ALLOWED_HOSTS:-}
+      - RAG_REDACT_ANSWERS
+      - RAG_SOURCE_ROLES
       # Who may set the client address. Use * only once port 8000 is no longer published.
       - FORWARDED_ALLOW_IPS=${FORWARDED_ALLOW_IPS:-127.0.0.1}
       - RAG_SESSION_TTL_HOURS=${RAG_SESSION_TTL_HOURS:-720}
