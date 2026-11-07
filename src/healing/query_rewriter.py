@@ -22,6 +22,7 @@ from src.generation.llm_client import LLMClient
 from src.healing.prompts import QUERY_REWRITE_PROMPT, REWRITE_STRATEGIES
 from src.healing.query_analysis import content_terms
 from src.healing.types import QueryAnalysis
+from src.prompt_catalog import QUERY_REWRITE, resolve_builtin
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,7 @@ class QueryRewriter:
         from src.evaluation.metrics import _extract_json_object
 
         assert self.llm_client is not None
-        prompt = QUERY_REWRITE_PROMPT.format(
+        prompt = resolve_builtin(QUERY_REWRITE, QUERY_REWRITE_PROMPT).format(
             question=analysis.original,
             previous="; ".join(f'"{q}"' for q in previous_queries) or "none",
             question_type=analysis.question_type,

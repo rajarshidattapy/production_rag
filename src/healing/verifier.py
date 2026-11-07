@@ -36,6 +36,7 @@ from src.healing.types import (
     RetrievalSignals,
     VerificationResult,
 )
+from src.prompt_catalog import VERIFIER_JUDGE, resolve_builtin
 
 logger = logging.getLogger(__name__)
 
@@ -244,7 +245,7 @@ class Verifier:
         from src.evaluation.metrics import _extract_json_object
 
         assert self.llm_client is not None
-        prompt = VERIFIER_JUDGE_PROMPT.format(
+        prompt = resolve_builtin(VERIFIER_JUDGE, VERIFIER_JUDGE_PROMPT).format(
             question=question, context=_format_numbered(contexts), answer=answer
         )
         try:

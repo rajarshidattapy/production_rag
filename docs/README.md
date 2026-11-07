@@ -313,13 +313,13 @@ Citation support is a word-overlap heuristic, so it can catch a misattributed ci
 - **Optional API Key Auth** — Set `RAG_API_KEY` to require `Authorization: Bearer <key>` on every route except `/healthz` and the UI page. Auth is off when the variable is unset, which is the default.
 - **Prometheus Metrics and Dashboard** — `/metrics` exposes per-route request counts and latency plus self-healing counters. The UI's Observability button shows them as a dashboard.
 - **OpenTelemetry and Langfuse Instrumentation (opt-in)** — With `MONITOR_ENABLED=true`, the HTTP service runs through `MonitoredRAGPipeline`, which traces ingest, retrieve, rerank, generate, and each healing step, with token and cost attribution and a circuit breaker. See [Monitoring & Observability](#monitoring--observability).
-- **Prompt Registry** — SHA-256 hash-based change detection for prompt versioning across deployments.
+- **Runtime Prompt Rollback** — The answering, condensation, verifier, rewrite, and repair prompts are stored as immutable SHA-256 versions in SQLite. Operators can validate and activate a new version or atomically restore the previously active one without restarting or redeploying the API; every activation is audited.
 - **LLM-as-Judge Evaluation** — All four RAGAS-style quality dimensions via `gpt-4o-mini` against a golden JSONL dataset, with CI quality gate (`--fail-on-threshold`): faithfulness, answer relevance, context precision (Average Precision @ k — are retrieved chunks relevant, ranked well?), and context recall (are reference-answer statements attributable to the retrieved context?).
 - **X-Request-ID** — Middleware echoes or generates an `X-Request-ID` header on every response. It is not yet attached to logs or traces.
 - **Context Budget** — `RAG_MAX_CONTEXT_CHARS` (default 12000) caps the context sent to the LLM as a cost guardrail. Passages past the budget are dropped, and the last one that fits is cut at the character limit, which can be mid-sentence.
 - **Security Hardening** — Path-traversal guards on `/ingest`, BM25 index stored as plain integer arrays loaded with `allow_pickle=False` (no pickle), 0o600 file permissions on data files, `re.escape()` on pricing pattern matching to prevent ReDoS.
 - **Docker Multi-Stage Build** — `deps → model-cache → runtime` stages; non-root user, with the default embedding and reranker models cached in the image. The image and compose stack have not been run end to end yet; see [known gaps](#known-gaps-to-close-before-production).
-- **Tests and CI** — 735 unit, integration, and stress tests (LLM calls mocked; no API keys needed). GitHub Actions workflows cover CI, the evaluation gate (skipped when the `OPENAI_API_KEY` secret is absent), and GHCR publish on every push to `master`.
+- **Tests and CI** — 745 passing unit, integration, and stress tests (LLM calls mocked; no API keys needed), plus 2 expected skips. GitHub Actions workflows cover CI, the evaluation gate (skipped when the `OPENAI_API_KEY` secret is absent), and GHCR publish on every push to `master`.
 
 ---
 
@@ -543,6 +543,7 @@ All settings use the `RAG_` prefix and can be set via `.env` or environment vari
 | `RAG_CORS_ORIGINS`               | `*`                                    | Comma-separated allowed CORS origins                        |
 | `RAG_API_KEY`                    | *(unset)*                              | Bearer token for API auth (disabled when unset)             |
 | `RAG_CHAT_DB_PATH`               | `<RAG_DATA_DIR>/chat.db`               | SQLite file for accounts and chats; use a local disk        |
+| `RAG_PROMPT_DB_PATH`             | `<RAG_DATA_DIR>/prompts.db`             | SQLite prompt versions, active pointers, and audit history  |
 | `RAG_ALLOW_SIGNUP`               | `true`                                 | Let anyone who can reach the server register                |
 | `RAG_ALLOW_STORE_RESET`          | `false`                                | Let `reset` on `/ingest` delete every user's documents      |
 | `RAG_SOURCE_AUTHORITY`           | `{}`                                   | JSON of folder to authority 0-100, e.g. `{"policies": 90}`   |
@@ -689,15 +690,26 @@ answer, citations = monitored.query("What is RAG?", use_hybrid=True)
 metrics.export_summary("monitoring-summary.json")
 ```
 
-### Prompt Registry
+### Runtime prompt versions and rollback
 
-```python
-from src.monitoring.prompts import PromptRegistry
+At startup, the application registers the seven built-in runtime prompts in `data/prompts.db` (or `RAG_PROMPT_DB_PATH`). Prompt text is immutable and identified by its SHA-256 hash. Registering a new version does not silently replace an existing active version; activation is an explicit, atomic operation. The API reads the active pointer when it uses a prompt, so a CLI change applies to the next request without a restart.
 
-registry    = PromptRegistry()
-prompt_hash = registry.register("system_v1", "You are a helpful assistant…")
-changed     = registry.detect_change("system_v1", new_prompt_text)
+```bash
+# Inspect prompt names, versions, and which version is active.
+python -m scripts.manage_prompts list
+
+# Validate and register a candidate, then activate it atomically.
+python -m scripts.manage_prompts register generation.default_system prompt.txt --activate
+
+# Restore the version that was active immediately before the current one.
+python -m scripts.manage_prompts rollback generation.default_system
+
+# Or choose a known SHA-256 hash/prefix and inspect the audit trail.
+python -m scripts.manage_prompts rollback generation.default_system --to 8d0c2f1a
+python -m scripts.manage_prompts history generation.default_system
 ```
+
+The CLI rejects missing or unexpected template placeholders such as `{context}`. It records the operating-system username by default; automation can supply `--actor release-bot`. Run it inside the API container for Compose deployments (`docker compose exec api python -m scripts.manage_prompts ...`) so it uses the mounted prompt database. If the database becomes unavailable at request time, the application logs the failure and uses the prompt compiled into the running release as an emergency fallback.
 
 ---
 
@@ -977,6 +989,8 @@ production-grade-rag/
 │   │   ├── prompts.py          # SHA-256 prompt registry
 │   │   └── wrappers.py         # MonitoredRAGPipeline instrumentation wrapper
 │   ├── pipeline.py             # RAGPipeline orchestration + async support
+│   ├── prompt_catalog.py       # Runtime prompt names and placeholder contracts
+│   ├── prompt_management.py    # Immutable versions, activation, audit, rollback
 │   ├── config.py               # RAGSettings (RAG_* env vars, pydantic-settings)
 │   └── utils/
 │       ├── i18n.py             # gettext internationalization helpers
@@ -987,6 +1001,7 @@ production-grade-rag/
 │   ├── ingest.py               # CLI document ingestion
 │   ├── query.py                # CLI query (auto-routes to API if running)
 │   ├── evaluate.py             # CLI evaluation runner
+│   ├── manage_prompts.py       # Register, activate, inspect, and roll back prompts
 │   ├── bench_vector_store.py   # HNSW and BM25 benchmarks
 │   └── operational_drill.py    # Failure drill (kills and restarts real processes)
 ├── data/

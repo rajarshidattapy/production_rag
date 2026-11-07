@@ -45,6 +45,12 @@ from src.healing.types import (
     VerificationResult,
 )
 from src.healing.verifier import ScoreKind, Verifier
+from src.prompt_catalog import (
+    CITATION_REPAIR,
+    CONTEXT_REPAIR,
+    GENERATION_REPAIR,
+    resolve_builtin,
+)
 from src.utils.page_query import strip_page_reference
 
 logger = logging.getLogger(__name__)
@@ -456,21 +462,21 @@ class HealingEngine:
                 )
                 plan = plan.model_copy(update={"strategy": f"{plan.strategy}[{strategy}]"})
                 contexts = self._retrieve(question, plan, lang, attempt)
-                template = GENERATION_REPAIR_PROMPT
+                template = resolve_builtin(GENERATION_REPAIR, GENERATION_REPAIR_PROMPT)
 
             elif next_action == RepairAction.EXPAND_CONTEXT:
                 retrieval_retries += 1
                 self.metrics.record_retrieval_retry()
                 plan = self.policy.context_expansion_plan(plan)
                 contexts = self._retrieve(question, plan, lang, attempt)
-                template = CONTEXT_REPAIR_PROMPT
+                template = resolve_builtin(CONTEXT_REPAIR, CONTEXT_REPAIR_PROMPT)
 
             else:  # REGENERATE — same verified contexts, stricter prompt
                 self.metrics.record_regeneration()
                 template = (
-                    CITATION_REPAIR_PROMPT
+                    resolve_builtin(CITATION_REPAIR, CITATION_REPAIR_PROMPT)
                     if failure == FailureType.CITATION_FAILURE
-                    else GENERATION_REPAIR_PROMPT
+                    else resolve_builtin(GENERATION_REPAIR, GENERATION_REPAIR_PROMPT)
                 )
 
             # The repair prompt's valid-source range must match what the

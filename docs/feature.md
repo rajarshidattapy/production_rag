@@ -101,10 +101,6 @@
 - **Audit Logging:** Record security-sensitive actions such as uploads, queries, document modifications, deletions, and administrative operations without exposing sensitive content.
 - **Secrets Management:** Store API keys, database credentials, and encryption keys using a dedicated secrets manager instead of relying solely on environment variables.
 
-**Access for other tools**
-
-- **MCP server:** when deploying, expose the RAG service as an MCP server with `search_knowledge_base` (required) and `ask_knowledge_base` (optional, grounded answer with citations); keep ingestion and admin operations private.
-
 ### Stage 6: Infrastructure
 
 *Docker, CI, and running on several servers. Do this just before deploying.*
