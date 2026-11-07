@@ -33,7 +33,7 @@ def publish_job(url: str, queue_name: str, job_id: str) -> None:
         channel = connection.channel()
         channel.queue_declare(queue=queue_name, durable=True)
         channel.confirm_delivery()
-        accepted = channel.basic_publish(
+        channel.basic_publish(
             exchange="",
             routing_key=queue_name,
             body=json.dumps({"job_id": job_id}).encode(),
@@ -43,8 +43,6 @@ def publish_job(url: str, queue_name: str, job_id: str) -> None:
             ),
             mandatory=True,
         )
-        if not accepted:
-            raise IngestQueueUnavailable("RabbitMQ did not confirm the ingest job.")
     except (pika.exceptions.AMQPError, OSError) as exc:
         raise IngestQueueUnavailable(f"RabbitMQ is unavailable: {exc}") from exc
     finally:
