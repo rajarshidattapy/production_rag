@@ -3,12 +3,12 @@
 # =============================================================================
 
 # Configuration
-pydantic>=2.14.1
-pydantic-settings>=2.16.1
+pydantic>=2.14.3
+pydantic-settings>=2.16.2
 python-dotenv>=1.2.4
 
 # Ingestion
-pypdf>=6.21.2                         # PDF document loading
+pypdf>=6.21.4                         # PDF document loading
 
 # Vector Store & Embeddings
 chromadb>=1.5.9                      # Vector database
@@ -17,30 +17,30 @@ sentence-transformers>=6.2.0         # Embedding models + cross-encoders
 # Hybrid Search (Phase 2): BM25 is implemented in src/retrieval/hybrid.py (numpy only)
 
 # Generation
-openai>=3.37.0                        # OpenAI LLM backend
-anthropic>=2.1.0                    # Anthropic LLM backend
+openai>=3.46.0                        # OpenAI LLM backend
+anthropic>=2.6.0                    # Anthropic LLM backend
 
 # Utilities
 tqdm>=4.70.1                         # Progress bars
-redis[hiredis]>=7.3,<9               # Optional shared cache and rate-limit state
-pika>=1.3.2,<2                       # RabbitMQ client for background indexing jobs
+redis[hiredis]>=8.1.0,<9               # Optional shared cache and rate-limit state
+pika>=1.4.4,<2                       # RabbitMQ client for background indexing jobs
 
 # API service
-fastapi>=0.161.1                     # HTTP API layer
+fastapi>=0.162.0                     # HTTP API layer
 uvicorn[standard]>=0.54.0            # ASGI server
 langdetect>=1.0.9                    # Language detection for routing
 prometheus-client>=0.26.0            # /metrics scrape endpoint
 mcp>=2.3,<3                          # MCP server at /mcp and over stdio (src/mcp_server.py)
 
 # Observability (used only when MONITOR_ENABLED=true)
-langfuse>=2.60,<3                    # src/monitoring/tracing.py uses the v2 trace()/span() API
-opentelemetry-sdk>=1.30
-opentelemetry-exporter-otlp-proto-http>=1.30
+langfuse>=5.2.0,<6                    # src/monitoring/tracing.py uses the v2 trace()/span() API
+opentelemetry-sdk>=1.45.2
+opentelemetry-exporter-otlp-proto-http>=1.45.2
 
-pytest>=9.1.1
+pytest>=9.2.0
 pytest-cov>=7.1.0
-pytest-asyncio>=1.4.0
+pytest-asyncio>=1.4.1.post1
 httpx>=0.28.1
-ruff>=0.17.2
-mypy>=2.4.0
+ruff>=0.17.4
+mypy>=2.4.1
 
