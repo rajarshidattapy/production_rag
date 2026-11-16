@@ -484,23 +484,16 @@ class HybridRetriever:
             rrf_scores[doc_id] = score
 
         # --- Build result list ---
-        seen_docs: dict[str, dict[str, Any]] = {}
-        for r in bm25_results:
-            seen_docs[r["id"]] = r
-        for r in vector_results:
-            if r["id"] not in seen_docs:
-                seen_docs[r["id"]] = r
+        seen_docs = {r["id"]: r for r in vector_results}
+        seen_docs.update({r["id"]: r for r in bm25_results})
 
         sorted_ids = sorted(rrf_scores, key=lambda x: rrf_scores[x], reverse=True)[:k]
 
-        results = []
-        for doc_id in sorted_ids:
-            if doc_id in seen_docs:
-                result = dict(seen_docs[doc_id])
-                result["score"] = round(rrf_scores[doc_id], 4)
-                results.append(result)
-
-        return results
+        return [
+            {**seen_docs[doc_id], "score": round(rrf_scores[doc_id], 4)}
+            for doc_id in sorted_ids
+            if doc_id in seen_docs
+        ]
 
     def _bm25_search(
         self, query: str, k: int, where: dict[str, Any] | None = None
