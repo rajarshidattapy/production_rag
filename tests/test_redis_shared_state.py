@@ -135,7 +135,7 @@ def test_redis_outage_falls_back_to_the_local_limiter() -> None:
 
 
 def test_compose_keeps_redis_private_and_configures_the_api() -> None:
-    compose = Path("docker-compose.yml").read_text(encoding="utf-8")
+    compose = Path("src/deploy/docker-compose.yml").read_text(encoding="utf-8")
     redis_block = compose.split("  redis:", 1)[1].split("\n  chroma:", 1)[0]
     assert "redis:7.2.17-alpine" in redis_block
     assert "ports:" not in redis_block

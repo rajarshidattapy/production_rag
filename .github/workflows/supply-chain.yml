@@ -7,7 +7,7 @@ on:
       - "requirements*.txt"
       - "pyproject.toml"
       - "setup.py"
-      - "Dockerfile"
+      - "src/deploy/Dockerfile"
       - ".github/workflows/supply-chain.yml"
   pull_request:
     branches: [master]
@@ -15,7 +15,7 @@ on:
       - "requirements*.txt"
       - "pyproject.toml"
       - "setup.py"
-      - "Dockerfile"
+      - "src/deploy/Dockerfile"
       - ".github/workflows/supply-chain.yml"
   schedule:
     # Re-scan unchanged dependencies as vulnerability databases evolve.

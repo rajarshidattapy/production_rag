@@ -17,7 +17,7 @@ from src.chat import store as store_module
 from src.config import Settings, settings
 from src.generation import llm_client
 from src.monitoring.config import MonitoringSettings
-from src.secret_files import SecretFileError
+from src.deploy.secret_files import SecretFileError
 
 PASSWORD = "correct horse battery"
 QUESTION = "What does the confidential merger memo say?"

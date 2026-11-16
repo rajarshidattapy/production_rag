@@ -146,8 +146,8 @@ Vultr's automatic backups add 20%, about $4 to$5. A domain is roughly $1 a month
 
 ### Change in the repo first
 
-1. **Install CPU-only PyTorch in the Dockerfile.** The image currently pulls the full GPU build, which adds several GB and does nothing on a CPU VM.
-2. **Add Caddy for HTTPS** and stop publishing port 8000, which sends passwords and session cookies unencrypted. In `docker-compose.yml`, remove `ports` from `api`, then add this service and a `caddy_data` entry under `volumes`:
+1. **Install CPU-only PyTorch in `src/deploy/Dockerfile`.** The image currently pulls the full GPU build, which adds several GB and does nothing on a CPU VM.
+2. **Add Caddy for HTTPS** and stop publishing port 8000, which sends passwords and session cookies unencrypted. In `src/deploy/docker-compose.yml`, remove `ports` from `api`, then add this service and a `caddy_data` entry under `volumes`:
    ```yaml
         caddy:
           image: caddy:2

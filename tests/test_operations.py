@@ -51,7 +51,7 @@ def test_ci_install_file_exists() -> None:
 
 
 def test_compose_chroma_service_matches_the_image() -> None:
-    text = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    text = (ROOT / "src" / "deploy" / "docker-compose.yml").read_text(encoding="utf-8")
     assert "chroma_data:/data" in text, "Chroma 1.x persists to /data; other paths lose data"
     assert "chromadb/chroma:latest" not in text
     chroma = text[text.index("chroma:") : text.index("  api:")]
@@ -62,7 +62,7 @@ def test_compose_chroma_service_matches_the_image() -> None:
 
 
 def test_docker_image_includes_the_ui() -> None:
-    text = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    text = (ROOT / "src" / "deploy" / "Dockerfile").read_text(encoding="utf-8")
     runtime = text[text.index("AS runtime") :]
     assert re.search(r"^COPY .*\bindex\.html\b", runtime, re.M)
 

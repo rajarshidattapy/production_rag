@@ -24,7 +24,7 @@ from src.config import settings
 from src.evaluation.dataset import GoldenDataset
 from src.evaluation.runner import EvaluationFailed, EvaluationRunner
 from src.pipeline import RAGPipeline
-from src.secret_files import secret_value
+from src.deploy.secret_files import secret_value
 
 logging.basicConfig(
     level=getattr(logging, settings.log_level.upper(), logging.INFO),

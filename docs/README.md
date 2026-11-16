@@ -759,7 +759,7 @@ python -m scripts.manage_prompts rollback generation.default_system --to 8d0c2f1
 python -m scripts.manage_prompts history generation.default_system
 ```
 
-The CLI rejects missing or unexpected template placeholders such as `{context}`. It records the operating-system username by default; automation can supply `--actor release-bot`. Run it inside the API container for Compose deployments (`docker compose exec api python -m scripts.manage_prompts ...`) so it uses the mounted prompt database. If the database becomes unavailable at request time, the application logs the failure and uses the prompt compiled into the running release as an emergency fallback.
+The CLI rejects missing or unexpected template placeholders such as `{context}`. It records the operating-system username by default; automation can supply `--actor release-bot`. Run it inside the API container for Compose deployments (`docker compose -f src/deploy/docker-compose.yml exec api python -m scripts.manage_prompts ...`) so it uses the mounted prompt database. If the database becomes unavailable at request time, the application logs the failure and uses the prompt compiled into the running release as an emergency fallback.
 
 ---
 
@@ -788,7 +788,7 @@ docker run -p 8000:8000 \
 ### Compose
 
 ```bash
-docker compose up --build
+docker compose -f src/deploy/docker-compose.yml up --build
 ```
 
 This starts the API, one indexing worker, a private RabbitMQ broker, a private Chroma server, and a private ephemeral Redis instance. RabbitMQ holds durable ingest messages; job state remains in `data/chat.db`, and the worker acknowledges a message only after the job reaches a terminal state. Redis shares query embeddings and authentication-attempt limits across API replicas; it does not cache generated answers or hold durable application data. Direct runs keep the original in-memory cache behavior unless `RAG_REDIS_URL` is set. For agents, set `RAG_MCP_ENABLED=true` and `RAG_MCP_ALLOWED_HOSTS` to serve the read-only [MCP server](#mcp-server) at `/mcp`. Compose reads the `RAG_LLM_*`, `RAG_API_KEY`, `RAG_CORS_ORIGINS`, `MONITOR_ENABLED`, and provider key values from your `.env` for substitution. On Linux hosts, `./data` must be writable by UID 1001, the user both application containers run as.
@@ -846,8 +846,8 @@ Last assessed 2026-11-03, on commit `a9d1baf` plus the fixes described here.
 | Failure drill | `python scripts/operational_drill.py`: real API and Chroma processes, hard-killed and restarted | 26 of 26 checks met, results below |
 | Retrieval and answer quality | `scripts/evaluate.py` and `--healing-report` | **No published results.** They need a provider API key, and the test suite does not measure answer quality |
 | Real providers | Anthropic and OpenAI calls | **Not run against live APIs.** Tests use mocks, and the drill uses a local fake. Mocks hid a bug that made every Anthropic call fail until `autospec` tests against the real SDK signatures were added |
-| Docker image | `Dockerfile` | **Not built.** Read through only |
-| `docker compose` | `docker-compose.yml` | **Not run.** Checked against the published Chroma 1.5.9 image: it persists to `/data`, and it has `bash` but no `curl` |
+| Docker image | `src/deploy/Dockerfile` | **Not built.** Read through only |
+| `docker compose` | `src/deploy/docker-compose.yml` | **Not run.** Checked against the published Chroma 1.5.9 image: it persists to `/data`, and it has `bash` but no `curl` |
 | Production deployment | None | **None.** No real traffic, SLOs, alerting, on-call, or incident history |
 
 ### Failure drill results
@@ -1063,7 +1063,7 @@ production-grade-rag/
 │   ├── ci.yml                  # Lint, type-check, test (Python 3.11 + 3.12)
 │   ├── evaluate.yml            # RAG faithfulness quality gate
 │   └── docker-publish.yml      # GHCR publish on release / main push
-├── Dockerfile                  # Multi-stage: deps → model-cache → runtime
+├── src/deploy/Dockerfile       # Multi-stage: deps → model-cache → runtime
 ├── .env.example                # Template for all required env vars
 ├── requirements.txt            # Runtime dependencies
 ├── requirements-dev.txt        # Dev/test dependencies
@@ -1084,7 +1084,7 @@ production-grade-rag/
 - **Secret hygiene** — No partial key logging; keys validated structurally, not compared in logs.
 - **No internal error leakage** — Readiness/health failures are logged server-side; clients receive a generic status message.
 - **CORS** — `RAG_CORS_ORIGINS` restricts cross-origin access; defaults to `*` for local development only.
-- **Deployment-topology hardening** — `docker-compose.yml` is written so ChromaDB's REST API is not published to the host, reachable only over the internal Docker network. This is a property of the file; the compose stack itself has not been run.
+- **Deployment-topology hardening** — `src/deploy/docker-compose.yml` is written so ChromaDB's REST API is not published to the host, reachable only over the internal Docker network. This is a property of the file; the compose stack itself has not been run.
 - **Dependency updates** — Dependabot is configured. `pip-audit` was run manually during the audits recorded in the Analysis Report below, and it is not part of CI.
 
 To report a security vulnerability, please open a private advisory via GitHub Security.

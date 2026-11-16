@@ -8,12 +8,12 @@ from typing import Annotated, Literal
 from pydantic import Field, StringConstraints
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
-from src.secret_files import SecretFilesSource
+from src.deploy.secret_files import SecretFilesSource
 
 # Collection and role names: lowercase, so "HR" and "hr" can't become two different roles.
 AccessName = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9_.-]{0,63}$")]
 
-# Read from a secrets manager's files first (see src/secret_files.py), then the environment.
+# Read from a secrets manager's files first (see src/deploy/secret_files.py), then the environment.
 SECRET_FIELDS = ("openai_api_key", "anthropic_api_key", "api_key", "redis_url", "rabbitmq_url")
 
 

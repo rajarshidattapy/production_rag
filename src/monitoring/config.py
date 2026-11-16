@@ -8,7 +8,7 @@ from typing import Any
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
-from src.secret_files import SecretFilesSource
+from src.deploy.secret_files import SecretFilesSource
 
 logger = logging.getLogger(__name__)
 

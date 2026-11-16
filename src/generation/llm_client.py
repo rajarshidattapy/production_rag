@@ -11,7 +11,7 @@ import os
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
-from src.secret_files import secret_value
+from src.deploy.secret_files import secret_value
 from src.utils.retry import async_retry_with_backoff, retry_with_backoff
 from src.utils.usage import request_usage
 
