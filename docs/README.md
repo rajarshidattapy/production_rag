@@ -96,4 +96,37 @@ flowchart TD
 Hybrid search, reranking, and self-healing are three independent switches, all off by default. Instrumentation is shown separately in [Monitoring & Observability](#monitoring--observability), because it differs by entry point.
 
 
-For detailed operations, configuration, deployment, evaluation, and security guidance, see [api.md](api.md), [novelties.md](novelties.md), [feature.md](feature.md), [files.md](files.md), and the source-level documentation.
+## Quickstart
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate                 # Windows
+pip install -r requirements.txt
+copy .env.example .env                   # set OPENAI_API_KEY or ANTHROPIC_API_KEY
+python -m uvicorn src.api:app --reload
+```
+
+Open `http://localhost:8000`, or use the API documentation at `http://localhost:8000/docs`. For a server-side document, call `POST /ingest`; then call `POST /query` with `{"question": "..."}`.
+
+## Configuration
+
+Copy `.env.example` to `.env`; all application settings use the `RAG_` prefix. At minimum configure an LLM provider/key. Common optional settings are `RAG_LLM_MODEL`, `RAG_DATA_DIR`, `RAG_CHROMA_PATH`, `RAG_API_KEY`, and `RAG_MCP_ENABLED`. Monitoring uses the separate `MONITOR_` prefix. See the focused guides below before enabling production features.
+
+## Guides
+
+- [API reference](api.md)
+- [MCP](mcp.md)
+- [Monitoring and observability](monitoring_observability.md)
+- [Evaluation](evaluation.md)
+- [Self-healing](self_healing.md)
+- [Security](security.md)
+- [Deployment](deploy.md)
+- [Testing](testing.md)
+- [Production readiness](production_ready.md)
+- [Implemented novelties](novelties.md)
+- [Project file map](files.md)
+- [Future work](feature.md)
+
+## License
+
+This project is proprietary. See [LICENSE](../LICENSE).

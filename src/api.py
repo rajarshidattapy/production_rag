@@ -196,6 +196,8 @@ app = FastAPI(
 # an Authorization header.
 _auth = Depends(_check_api_key)
 _UI_PATH = Path(__file__).resolve().parents[1] / "index.html"
+_DOCS_UI_PATH = Path(__file__).resolve().parents[1] / "docs.html"
+_DOCS_PATH = Path(__file__).resolve().parents[1] / "docs"
 app.router.routes.append(
     Route("/mcp", _MCPEndpoint(), methods=["GET", "POST", "DELETE"], include_in_schema=False)
 )
@@ -528,6 +530,23 @@ def healthz() -> HealthResponse:
 def ui() -> FileResponse:
     """Serve the lightweight local RAG user interface."""
     return FileResponse(_UI_PATH)
+
+
+@app.get("/docs.html", include_in_schema=False)
+def docs_ui() -> FileResponse:
+    """Serve the local documentation browser."""
+    return FileResponse(_DOCS_UI_PATH)
+
+
+@app.get("/documentation/{name}", include_in_schema=False)
+def documentation(name: str) -> FileResponse:
+    """Serve one repository Markdown document without exposing arbitrary files."""
+    if not name.endswith(".md") or Path(name).name != name:
+        raise HTTPException(status_code=404, detail="Documentation not found")
+    path = _DOCS_PATH / name
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Documentation not found")
+    return FileResponse(path, media_type="text/markdown")
 
 
 _models_warm = threading.Event()

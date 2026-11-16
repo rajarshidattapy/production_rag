@@ -8,7 +8,7 @@
 </head>
 <body><div class="app">
   <aside class="sidebar"><div class="brand">RAG <span>Desk</span></div><button class="new-chat" id="newChat">+ New chat</button>
-    <button class="new-chat dash-open" id="openDash" type="button" title="Open the observability dashboard"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M2 14V8M6.5 14V2M11 14V6M14 14H1"/></svg>Observability</button>
+    <button class="new-chat dash-open" id="openDash" type="button" title="Open the observability dashboard"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M2 14V8M6.5 14V2M11 14V6M14 14H1"/></svg>Observability</button><button class="new-chat" type="button" onclick="location.href='/docs.html'">Documentation</button>
     <div class="notice" id="uploadNotice"></div><div id="jobs" aria-live="polite"></div>
     <div class="history-label">Your chats</div><nav id="history" aria-label="Chat history"></nav>
     <div class="side-footer"><details><summary>Retrieval options</summary><div class="options"><label>Top results <input id="topK" type="number" min="1" max="20" value="5"></label><div class="checks"><label><input id="hybrid" type="checkbox"> Hybrid</label><label><input id="reranker" type="checkbox"> Re-rank</label><label><input id="healing" type="checkbox"> Self-heal</label></div></div></details><details style="margin-top:9px"><summary>Server folder</summary><form class="options" id="folderForm"><label>Folder inside the data directory<input id="folderPath" placeholder="data/my-docs" required></label><button class="link" id="indexFolder">Index this folder</button></form></details><details style="margin-top:9px"><summary>API access</summary><label class="options">Bearer token<input id="apiKey" type="text" placeholder="Optional"></label></details><div class="notice" id="stats"></div><div class="account"><span id="accountName"></span><button class="link" id="signOut" type="button">Sign out</button></div></div>
@@ -565,7 +565,7 @@ request('/auth/me',{headers:headers()}).then(signedIn).catch(error=>showAuth(err
 <script id="obsLib">
   /* Pure helpers (no DOM): Prometheus text parsing and summarising. */
   const Obs = (() => {
-    const SYSTEM_PATHS = new Set(['/metrics', '/stats', '/healthz', '/readyz', '/', '/index.html', 'unmatched', '/auth/register', '/auth/login', '/auth/logout', '/auth/me', '/chats', '/chats/import', '/chats/{chat_id}', '/chats/{chat_id}/files', '/chunks/{chunk_id}', '/ingest/jobs', '/ingest/jobs/{job_id}', '/ingest/jobs/{job_id}/cancel', '/ingest/jobs/{job_id}/retry']);
+    const SYSTEM_PATHS = new Set(['/metrics', '/stats', '/healthz', '/readyz', '/', '/index.html', '/docs.html', '/documentation/{name}', 'unmatched', '/auth/register', '/auth/login', '/auth/logout', '/auth/me', '/chats', '/chats/import', '/chats/{chat_id}', '/chats/{chat_id}/files', '/chunks/{chunk_id}', '/ingest/jobs', '/ingest/jobs/{job_id}', '/ingest/jobs/{job_id}/cancel', '/ingest/jobs/{job_id}/retry']);
     const FRIENDLY = {
       '/chats/{chat_id}/messages': 'Ask a question', '/query': 'Ask a question (API)', '/query/stream': 'Ask a question (streaming)', '/upload': 'Upload a PDF',
       '/ingest': 'Index a document', '/ingest/async': 'Index in the background',

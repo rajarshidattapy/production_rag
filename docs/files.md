@@ -9,8 +9,9 @@ This is a production-ready RAG (Retrieval-Augmented Generation) application: it 
 | `tests` (tests)                                             | Automated tests for every major feature.                                                                                |
 | `data` (data)                                               | Runtime data: uploaded documents, vector index, SQLite databases, evaluation datasets.                                  |
 | `scripts` (scripts)                                         | Command-line utilities for ingesting, querying, evaluating, benchmarking, and administration.                           |
-| `docs` (docs)                                               | Project documentation: [`README.md`](README.md) overview, [`api.md`](api.md) API index, [`novelties.md`](novelties.md) implemented capabilities, and [`files.md`](files.md) file map. |
+| `docs` (docs)                                               | Focused project documentation: overview, API, MCP, monitoring, evaluation, self-healing, security, deployment, testing, production readiness, novelties, and file map. |
 | `index.html` (index.html)                                   | Single-page browser chat/upload UI served by the API.                                                                   |
+| `docs.html` (docs.html)                                     | Browser-based renderer for the Markdown files in `docs/`.                                                               |
 | `pyproject.toml` (pyproject.toml)                           | Python project metadata, tooling configuration, lint/test settings.                                                     |
 | `requirements.txt` (requirements.txt)                       | Python dependencies.                                                                                                    |
 | [`setup.py`](http://setup.py) ([setup.py](http://setup.py)) | Package/install definition and console entry points.                                                                    |

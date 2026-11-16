@@ -15,6 +15,8 @@ When `RAG_API_KEY` is set, send `Authorization: Bearer <key>` to protected endpo
 | GET | `/stats` | Pipeline and store statistics. |
 | GET | `/metrics` | Prometheus-format application metrics. |
 | GET | `/` | Browser UI. |
+| GET | `/docs.html` | Documentation browser. |
+| GET | `/documentation/{name}` | Read one public Markdown file from `docs/`. |
 
 ## Knowledge base
 
