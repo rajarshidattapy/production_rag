@@ -184,7 +184,3 @@ class TestSecretFiles:
         (secrets_dir / "openai_api_key").write_text("\n", encoding="utf-8")
         monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
         assert Settings(_env_file=None).openai_api_key == "sk-from-env"
-
-    def test_monitoring_keys_come_from_files_too(self, secrets_dir: Path) -> None:
-        (secrets_dir / "monitor_langfuse_secret_key").write_text("sk-lf-file", encoding="utf-8")
-        assert MonitoringSettings(_env_file=None).langfuse_secret_key == "sk-lf-file"

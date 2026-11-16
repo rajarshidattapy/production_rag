@@ -15,7 +15,7 @@ from src.utils.usage import UsageTracker, request_usage
 
 from .extensions import (
     BaseExtension,
-    LangfuseTracingExtension,
+    OTelTracingExtension,
     OTelMetricsExtension,
 )
 from .tracing import Tracer
@@ -75,7 +75,7 @@ def _count_tokens(text: str, model: str = "gpt-4") -> int:
 class MonitoredRAGPipeline:
     """Instrumented wrapper around RAGPipeline.
 
-    Adds Langfuse tracing and OTel metrics to every pipeline step
+    Adds OpenTelemetry traces and metrics to every pipeline step
     via a pluggable extension architecture.
 
     Trace nesting and per-query token totals are thread-local, because the HTTP service
@@ -94,15 +94,15 @@ class MonitoredRAGPipeline:
         self.extensions = extensions or []
 
         # Backward compatibility for direct tracer/metrics configurations
-        has_tracing = any(isinstance(e, LangfuseTracingExtension) for e in self.extensions)
+        has_tracing = any(isinstance(e, OTelTracingExtension) for e in self.extensions)
         has_metrics = any(isinstance(e, OTelMetricsExtension) for e in self.extensions)
 
         if not has_tracing:
             self._tracer = tracer or Tracer()
-            self.extensions.append(LangfuseTracingExtension(self._tracer))
+            self.extensions.append(OTelTracingExtension(self._tracer))
         else:
             self._tracer = next(
-                e.tracer for e in self.extensions if isinstance(e, LangfuseTracingExtension)
+                e.tracer for e in self.extensions if isinstance(e, OTelTracingExtension)
             )
 
         if not has_metrics:

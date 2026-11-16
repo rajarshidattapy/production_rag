@@ -556,7 +556,7 @@ request('/auth/me',{headers:headers()}).then(signedIn).catch(error=>showAuth(err
           <dt>Self-healing outcomes</dt><dd><b>Passed first time</b>: the answer was verified immediately. <b>Recovered</b>: it failed a check, was repaired and then passed. <b>Declined</b>: it could not be verified after retrying, so the service said so instead of guessing.</dd>
         </dl>
       </details>
-      <p class="dash-note">Counts are totals since the server last started. Traces and cost data from OpenTelemetry or Langfuse, when enabled, are sent to that tool and do not appear here.</p>
+      <p class="dash-note">Counts are totals since the server last started. Traces and cost data from OpenTelemetry, when enabled, are sent to the configured collector and do not appear here.</p>
     </div>
   </div>
 </div>

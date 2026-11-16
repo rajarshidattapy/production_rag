@@ -299,7 +299,7 @@ class _RecordingExtension:
 
 
 def test_monitored_pipeline_traces_each_healing_attempt(pipeline: RAGPipeline) -> None:
-    from src.monitoring.extensions import LangfuseTracingExtension, OTelMetricsExtension
+    from src.monitoring.extensions import OTelMetricsExtension, OTelTracingExtension
     from src.monitoring.wrappers import MonitoredRAGPipeline
 
     calls = {"n": 0}
@@ -312,7 +312,7 @@ def test_monitored_pipeline_traces_each_healing_attempt(pipeline: RAGPipeline) -
         return _grounded_answer(query, contexts)
 
     rec = _RecordingExtension()
-    tracing = LangfuseTracingExtension(tracer=MagicMock())
+    tracing = OTelTracingExtension(tracer=MagicMock())
     metrics = OTelMetricsExtension(metrics=MagicMock())
     # Patch before wrapping: MonitoredRAGPipeline captures generator.generate
     # at construction and wraps it with its tracing layer.

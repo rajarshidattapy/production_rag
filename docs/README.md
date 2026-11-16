@@ -17,7 +17,7 @@
 | :-- | :-- |
 | **Core** | ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white) ![Pydantic](https://img.shields.io/badge/Pydantic-2.14%2B-E92063?style=flat-square&logo=pydantic&logoColor=white) |
 | **Retrieval & models** | ![ChromaDB](https://img.shields.io/badge/ChromaDB-1.5%2B-FFDE2D?style=flat-square) ![OpenAI](https://img.shields.io/badge/OpenAI-412991?style=flat-square&logo=openai&logoColor=white) ![Anthropic](https://img.shields.io/badge/Anthropic-191919?style=flat-square&logo=anthropic&logoColor=white) ![OpenRouter](https://img.shields.io/badge/OpenRouter-6566F1?style=flat-square&logo=openrouter&logoColor=white) |
-| **Observability** | ![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-1.30%2B-F5A800?style=flat-square&logo=opentelemetry&logoColor=white) ![Prometheus client](https://img.shields.io/badge/Prometheus_client-0.26%2B-E6522C?style=flat-square&logo=prometheus&logoColor=white) ![Langfuse](https://img.shields.io/badge/Langfuse-2.60%2B-4E9CFF?style=flat-square) ![Grafana](https://img.shields.io/badge/Grafana-F46800?style=flat-square&logo=grafana&logoColor=white) |
+| **Observability** | ![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-1.30%2B-F5A800?style=flat-square&logo=opentelemetry&logoColor=white) ![Prometheus client](https://img.shields.io/badge/Prometheus_client-0.26%2B-E6522C?style=flat-square&logo=prometheus&logoColor=white) ![Grafana](https://img.shields.io/badge/Grafana-F46800?style=flat-square&logo=grafana&logoColor=white) |
 | **Async & messaging** | ![Celery](https://img.shields.io/badge/Celery-37814A?style=flat-square&logo=celery&logoColor=white) ![RabbitMQ](https://img.shields.io/badge/RabbitMQ-FF6600?style=flat-square&logo=rabbitmq&logoColor=white) ![Kafka](https://img.shields.io/badge/Apache_Kafka-231F20?style=flat-square&logo=apachekafka&logoColor=white) ![Redis](https://img.shields.io/badge/Redis-DC382D?style=flat-square&logo=redis&logoColor=white) |
 | **Infra & deploy** | ![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white) ![Kubernetes](https://img.shields.io/badge/Kubernetes-326CE5?style=flat-square&logo=kubernetes&logoColor=white) ![Terraform](https://img.shields.io/badge/Terraform-844FBA?style=flat-square&logo=terraform&logoColor=white) ![Ansible](https://img.shields.io/badge/Ansible-EE0000?style=flat-square&logo=ansible&logoColor=white) ![Caddy](https://img.shields.io/badge/Caddy-1F88C0?style=flat-square&logo=caddy&logoColor=white) |
 | **Cloud** | ![AWS](https://img.shields.io/badge/AWS-232F3E?style=flat-square&logo=amazonwebservices&logoColor=white) ![SageMaker](https://img.shields.io/badge/Amazon_SageMaker-FF9900?style=flat-square) ![Vultr](https://img.shields.io/badge/Vultr-007BFC?style=flat-square&logo=vultr&logoColor=white) |
@@ -300,7 +300,7 @@ Citation support is a word-overlap heuristic, so it can catch a misattributed ci
 | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
 | **1 — Core RAG**                   | Document loading, recursive chunking, ChromaDB vector store, OpenAI/Anthropic generation, citations                                                                                             | `src/ingestion/`, `src/retrieval/vector_store.py`, `src/generation/` |
 | **2 — Hybrid Search + Reranking**  | BM25 keyword index, Reciprocal Rank Fusion (RRF), cross-encoder reranker, per-language collections                                                                                              | `src/retrieval/hybrid.py`, `src/retrieval/reranker.py`               |
-| **3 — Evaluation + Observability** | LLM-as-Judge faithfulness scoring, golden dataset CI gate, OpenTelemetry metrics, Langfuse tracing, prompt registry                                                                             | `src/evaluation/`, `src/monitoring/`                                 |
+| **3 — Evaluation + Observability** | LLM-as-Judge faithfulness scoring, golden dataset CI gate, OpenTelemetry metrics and traces, prompt registry                                                                                 | `src/evaluation/`, `src/monitoring/`                                 |
 | **4 — Self-Healing**               | Post-generation verifier, deterministic failure diagnosis, query rewriting, adaptive retrieval, generation repair, structured abstention, healing metrics/traces, baseline-vs-healed evaluation | `src/healing/`, `src/evaluation/healing_eval.py`                     |
 
 
@@ -321,7 +321,7 @@ Citation support is a word-overlap heuristic, so it can catch a misattributed ci
 - **Audit Log** — Sign-ins, uploads, ingests, queries, passage reads, chat deletions, refused API keys, and the `manage_users` and `manage_prompts` commands each write one JSON line to `data/audit.log` (or standard output): who, from where, what, and the outcome. It records sizes, IDs, and a SHA-256 of each upload, never document text, questions, answers, or passwords.
 - **Secrets from Files** — API keys and credential-bearing URLs are read first from files a secrets manager mounts (Docker or Kubernetes secrets, Vault Agent, cloud secrets-store CSI drivers): `<NAME>_FILE`, else `<name>` in `RAG_SECRETS_DIR` (`/run/secrets`). Compose mounts `./secrets` there, and a file wins over the environment variable.
 - **Prometheus Metrics and Dashboard** — `/metrics` exposes per-route request counts and latency plus self-healing counters. The UI's Observability button shows them as a dashboard.
-- **OpenTelemetry and Langfuse Instrumentation (opt-in)** — With `MONITOR_ENABLED=true`, the HTTP service runs through `MonitoredRAGPipeline`, which traces ingest, retrieve, rerank, generate, and each healing step, with token and cost attribution and a circuit breaker. See [Monitoring & Observability](#monitoring--observability).
+- **OpenTelemetry Instrumentation (opt-in)** — With `MONITOR_ENABLED=true`, the HTTP service runs through `MonitoredRAGPipeline`, which exports traces for ingest, retrieve, rerank, generate, and each healing step, with token and cost attribution. See [Monitoring & Observability](#monitoring--observability).
 - **Runtime Prompt Rollback** — The answering, condensation, verifier, rewrite, and repair prompts are stored as immutable SHA-256 versions in SQLite. Operators can validate and activate a new version or atomically restore the previously active one without restarting or redeploying the API; every activation is audited.
 - **LLM-as-Judge Evaluation** — All four RAGAS-style quality dimensions via `gpt-4o-mini` against a golden JSONL dataset, with CI quality gate (`--fail-on-threshold`): faithfulness, answer relevance, context precision (Average Precision @ k — are retrieved chunks relevant, ranked well?), and context recall (are reference-answer statements attributable to the retrieved context?).
 - **X-Request-ID** — Middleware echoes or generates an `X-Request-ID` header on every response. It is not yet attached to logs or traces.
@@ -638,9 +638,6 @@ More tuning knobs (`RAG_HEALING_*`) are documented in the [Self-Healing section]
 | Variable                                   | Default                 | Description                                                                     |
 | ------------------------------------------ | ----------------------- | ------------------------------------------------------------------------------- |
 | `MONITOR_ENABLED`                          | `false`                 | Runs the HTTP service and `scripts/evaluate.py` through `MonitoredRAGPipeline`  |
-| `MONITOR_LANGFUSE_SECRET_KEY`              | —                       | Langfuse secret key (`sk-lf-…`)                                                 |
-| `MONITOR_LANGFUSE_PUBLIC_KEY`              | —                       | Langfuse public key (`pk-lf-…`)                                                 |
-| `MONITOR_LANGFUSE_HOST`                    | `http://localhost:3000` | Langfuse server URL                                                             |
 | `MONITOR_OTEL_SERVICE_NAME`                | `rag-pipeline`          | OTel service name                                                               |
 | `MONITOR_OTEL_EXPORTER_OTLP_ENDPOINT`      | `http://localhost:4318` | OTLP receiver endpoint                                                          |
 | `MONITOR_CIRCUIT_BREAKER_THRESHOLD`        | `3`                     | Failures before circuit opens                                                   |
@@ -665,13 +662,12 @@ flowchart LR
     end
     subgraph WRAP["With MONITOR_ENABLED=true: MonitoredRAGPipeline"]
         STAGES[ingest, retrieve, rerank,<br/>generate, streaming,<br/>each healing step] --> EXT[Extension hooks<br/>circuit breaker]
-        EXT --> LF[Langfuse traces,<br/>tokens and cost]
-        EXT --> OTLP[OTLP metrics]
+        EXT --> OTLP[OTLP traces, metrics,<br/>tokens and cost]
         STAGES --> REG[Prompt registry]
     end
 ```
 
-The wrapper applies to the HTTP service and `scripts/evaluate.py`. `requirements.txt` includes the Langfuse v2 SDK (the tracer uses its `trace()`/`span()` API, so it is pinned below v3) and the OTLP exporter. The drill confirmed that a server with this setting sends metrics and traces to the configured endpoints, using local fake endpoints rather than real Langfuse or collector services.
+The wrapper applies to the HTTP service and `scripts/evaluate.py`. `requirements.txt` includes the OTLP exporter. The drill confirms that a server with this setting sends metrics and traces to the configured collector endpoint using a local fake collector.
 
 ### What each pipeline stage emits
 
@@ -702,15 +698,15 @@ With `MONITOR_ENABLED=true` and an OTLP endpoint reachable, these are exported:
 
 A JSON summary (P50/P95 latency, avg cost, error count) is exported via `MetricsCollector.export_summary()` and written with 0o600 permissions.
 
-### Langfuse Tracing
+### OpenTelemetry Tracing
 
-With `MONITOR_ENABLED=true` and Langfuse credentials set, each query creates a trace with spans for:
+With `MONITOR_ENABLED=true`, each query creates an OTLP trace with spans for:
 
 - `retrieve` — vector/hybrid search timing
 - `rerank` — cross-encoder reranking timing
 - `generate` — LLM generation with model, token counts, and cost
 
-A circuit breaker (`MONITOR_CIRCUIT_BREAKER_THRESHOLD`) isolates Langfuse failures so a tracing outage does not block query responses.
+Tracing failures are isolated so an unavailable collector never blocks query responses.
 
 ### Self-Healing Observability
 
@@ -872,7 +868,7 @@ The drill uses real API and Chroma server processes on loopback, a local fake LL
 | Async job status after restart | Job still known | 200, status `completed` | Yes |
 | Two replicas: cross-replica ingest | Replica B finds a document ingested through A | Found | Yes |
 | Two replicas: A runs `reset=true` | B keeps working with no restart | 200 | Yes |
-| `MONITOR_ENABLED=true` | `/query` and `/query/stream` work; data reaches OTLP and Langfuse endpoints | Both work; 8 OTLP exports and 4 Langfuse calls to local fakes | Yes |
+| `MONITOR_ENABLED=true` | `/query` and `/query/stream` work; metrics and traces reach the OTLP collector | Both work; local fake collector receives both signal types | Yes |
 
 **Reading the load numbers:** treat them as rough. Run to run they varied widely on this machine: an earlier run of the previous code measured 99 and 40 req/s, while a side-by-side comparison measured 42 and 29 req/s for the previous code and 37 and 28 req/s for the current code. They exclude real LLM, embedding, and reranker time, which should dominate in production.
 
@@ -919,7 +915,7 @@ The drill uses real API and Chroma server processes on loopback, a local fake LL
 - Corpora beyond 100k chunks (the 1M figures are extrapolations)
 - Disk-full, network partition, and multi-host deployment
 - Backup and restore, index format upgrades, and rollback
-- Real Langfuse and OTLP backends (the drill uses local fakes)
+- A production OTLP collector and trace backend (the drill uses a local fake collector)
 - Security testing of a deployed instance; the audit notes further down this page are code reviews
 
 ---
@@ -1037,7 +1033,7 @@ production-grade-rag/
 │   ├── monitoring/
 │   │   ├── config.py           # MonitoringSettings (MONITOR_* env vars)
 │   │   ├── metrics.py          # OTel MetricsCollector
-│   │   ├── tracing.py          # Langfuse Tracer with thread-local spans
+│   │   ├── tracing.py          # OTel tracer with thread-local spans
 │   │   ├── extensions.py       # CircuitBreaker, GuardrailExtension, OTelMetricsExtension
 │   │   ├── prompts.py          # SHA-256 prompt registry
 │   │   └── wrappers.py         # MonitoredRAGPipeline instrumentation wrapper
@@ -1101,7 +1097,7 @@ This project showcases production AI/ML engineering across the full stack:
 | **LLM integration**       | Dual-provider (OpenAI + Anthropic), async streaming, token tracking    |
 | **Information retrieval** | BM25, dense vector search, RRF fusion, cross-encoder reranking         |
 | **API design**            | FastAPI, SSE streaming, auth middleware, readiness probes              |
-| **Observability**         | Prometheus metrics and dashboard; opt-in OTel and Langfuse tracing with a circuit breaker |
+| **Observability**         | Prometheus metrics and dashboard; opt-in OTel tracing and metrics |
 | **LLM evaluation**        | LLM-as-Judge, faithfulness + relevance metrics, golden dataset CI gate |
 | **Security engineering**  | Auth, path traversal defense, safe file I/O, no pickle                 |
 | **Testing**               | 280 tests, stress test, failure drill, mocking strategy, coverage      |

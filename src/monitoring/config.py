@@ -5,10 +5,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from pydantic import field_validator
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
-
-from src.deploy.secret_files import SecretFilesSource
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +20,6 @@ class MonitoringSettings(BaseSettings):
 
     # Master switch: when False, nothing in src/monitoring/ is wired in.
     enabled: bool = False
-    langfuse_secret_key: str = ""
-    langfuse_public_key: str = ""
-    langfuse_host: str = "http://localhost:3000"
-    langfuse_release: str = "dev"
     otel_service_name: str = "rag-pipeline"
     otel_exporter_otlp_endpoint: str = "http://localhost:4318"
     pricing_file: str = "pricing.json"
@@ -44,27 +37,20 @@ class MonitoringSettings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
-        # The Langfuse keys can come from a secrets manager's files, like src/config.py's.
-        secret_files = SecretFilesSource(
-            settings_cls, ("langfuse_secret_key", "langfuse_public_key")
-        )
-        return init_settings, secret_files, env_settings, dotenv_settings, file_secret_settings
+        return init_settings, env_settings, dotenv_settings, file_secret_settings
 
-    @field_validator("langfuse_secret_key", "langfuse_public_key", mode="before")
     @classmethod
-    def validate_and_strip_keys(cls, v: Any) -> str:
+    def _normalise_value(cls, v: Any) -> str:
         if not isinstance(v, str):
             return ""
         stripped = v.strip()
         if stripped and not (
-            stripped.startswith("sk-lf-")
-            or stripped.startswith("pk-lf-")
-            or stripped.startswith("sk-")
+            stripped.startswith("sk-")
             or stripped.startswith("pk-")
         ):
             # Do NOT log the key value — even a partial prefix reduces brute-force space.
             logging.getLogger(__name__).warning(
-                "Monitoring key format might be incorrect (expected sk-lf- or pk-lf- prefix)"
+                "Monitoring value format might be incorrect"
             )
         return stripped
 

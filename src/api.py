@@ -204,7 +204,7 @@ app.router.routes.append(
 class _RequestIDMiddleware(BaseHTTPMiddleware):
     """Propagate or generate a unique X-Request-ID for every request.
 
-    Enables distributed trace correlation across Langfuse, OTel, and logs.
+    Enables distributed trace correlation across OTel traces and logs.
     The client may supply its own ID; we forward it unchanged, or generate
     a UUID4 if absent.
     """
@@ -220,7 +220,7 @@ app.add_middleware(_RequestIDMiddleware)
 
 # ---------------------------------------------------------------------------
 # Prometheus metrics — pull-based scrape endpoint, independent of the
-# push-based OTel/Langfuse pipeline in src/monitoring/. A dedicated
+# push-based OTel pipeline in src/monitoring/. A dedicated
 # registry (rather than the global default) keeps this isolated and
 # import-order-safe under repeated test-suite app construction.
 # ---------------------------------------------------------------------------
@@ -356,7 +356,7 @@ _pipeline: Any = None
 
 
 def _build_pipeline() -> Any:
-    """Build the pipeline, instrumented with OTel and Langfuse when MONITOR_ENABLED=true."""
+    """Build the pipeline, instrumented with OpenTelemetry when MONITOR_ENABLED=true."""
     pipeline = RAGPipeline()
 
     from src.monitoring.config import settings as monitoring_settings

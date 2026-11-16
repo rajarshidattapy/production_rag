@@ -298,7 +298,7 @@ def test_observer_sees_attempt_scoped_spans() -> None:
 
 def test_broken_observer_does_not_break_query() -> None:
     obs = MagicMock()
-    obs.on_step_start.side_effect = RuntimeError("langfuse down")
+    obs.on_step_start.side_effect = RuntimeError("telemetry backend down")
     result = _engine(FakeBackend(), observer=obs).run(QUESTION)
     assert result.info.status == "passed"
 

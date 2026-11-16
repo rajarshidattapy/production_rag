@@ -78,8 +78,8 @@ class BaseExtension:
         pass
 
 
-class LangfuseTracingExtension(BaseExtension):
-    """Extension to handle Langfuse tracing for pipeline operations."""
+class OTelTracingExtension(BaseExtension):
+    """Extension to handle OpenTelemetry tracing for pipeline operations."""
 
     def __init__(self, tracer: Tracer | None = None) -> None:
         self.tracer = tracer or Tracer()
@@ -119,7 +119,7 @@ class LangfuseTracingExtension(BaseExtension):
         try:
             fn(*args, **kwargs)
         except Exception as e:
-            logger.warning("Langfuse backend error: %s", e)
+            logger.warning("OTel tracing backend error: %s", e)
 
     def on_query_start(self, question: str, metadata: dict[str, Any]) -> None:
         try:
@@ -143,10 +143,7 @@ class LangfuseTracingExtension(BaseExtension):
 
         def task():
             output_val = {"answer": answer, "citations_count": len(citations)}
-            if isinstance(self._span, dict):
-                self._span["output"] = output_val
-            else:
-                self._span._output = output_val
+            self._span["output"] = output_val
             self._ctx.__exit__(None, None, None)
 
         self._execute(task)
@@ -187,14 +184,11 @@ class LangfuseTracingExtension(BaseExtension):
             return
 
         def task():
-            if isinstance(span, dict):
-                span["output"] = output_data
-                if metadata:
-                    span["metadata"].update(metadata)
-            else:
-                span._output = output_data
-                if metadata:
-                    span.update(metadata=metadata)
+            span["output"] = output_data
+            if metadata:
+                span["metadata"].update(metadata)
+                # Reassign so the OTel adapter records the augmented metadata.
+                span["metadata"] = span["metadata"]
             ctx.__exit__(None, None, None)
 
         self._execute(task)

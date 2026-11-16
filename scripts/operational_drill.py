@@ -136,11 +136,11 @@ class FakeLLM:
 
 
 class FakeOTLP:
-    """Counts OTLP metric exports and Langfuse ingestion calls instead of storing them."""
+    """Counts OTLP metric and trace exports instead of storing them."""
 
     def __init__(self) -> None:
         self.otlp = 0
-        self.langfuse = 0
+        self.traces = 0
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -151,9 +151,9 @@ class FakeOTLP:
                 self.rfile.read(int(self.headers.get("content-length", 0)))
                 if self.path.startswith("/v1/metrics"):
                     fake.otlp += 1
-                elif self.path.startswith("/api/public"):
-                    fake.langfuse += 1
-                self.send_response(207 if self.path.startswith("/api/public") else 200)
+                elif self.path.startswith("/v1/traces"):
+                    fake.traces += 1
+                self.send_response(200)
                 self.send_header("content-type", "application/json")
                 self.send_header("content-length", "2")
                 self.end_headers()
@@ -586,9 +586,6 @@ def run(out: str | None) -> None:
                     "MONITOR_ENABLED": "true",
                     "MONITOR_OTEL_EXPORTER_OTLP_ENDPOINT": f"http://127.0.0.1:{otlp.port}",
                     "MONITOR_OTEL_EXPORT_INTERVAL_MS": "1000",
-                    "MONITOR_LANGFUSE_SECRET_KEY": "sk-lf-drill",
-                    "MONITOR_LANGFUSE_PUBLIC_KEY": "pk-lf-drill",
-                    "MONITOR_LANGFUSE_HOST": f"http://127.0.0.1:{otlp.port}",
                 },
             )
             wait_healthy(client, b)
@@ -612,10 +609,10 @@ def run(out: str | None) -> None:
             )
             h.check(
                 "Monitoring",
-                "Langfuse traces reach the configured host",
-                "more than 0 ingestion calls",
-                str(otlp.langfuse),
-                otlp.langfuse > 0,
+                "OTLP traces reach the configured collector",
+                "more than 0 exports",
+                str(otlp.traces),
+                otlp.traces > 0,
             )
         finally:
             otlp.stop()

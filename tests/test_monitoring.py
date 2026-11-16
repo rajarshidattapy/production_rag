@@ -12,9 +12,9 @@ from src.monitoring.wrappers import MonitoredRAGPipeline
 
 
 class TestTracer:
-    def test_trace_step_disabled_yields_dict_span(self) -> None:
-        """When Langfuse is unavailable, trace_step yields a plain dict span."""
-        tracer = Tracer(enabled=True)  # no langfuse key → _langfuse stays None
+    def test_trace_step_yields_mapping_compatible_span(self) -> None:
+        """The tracer preserves the mapping contract used by extensions."""
+        tracer = Tracer(enabled=True)
         with tracer.trace_step("retrieve", input={"query": "q"}) as span:
             assert span["name"] == "retrieve"
             span["output"] = {"count": 5}
@@ -43,7 +43,7 @@ class TestTracer:
         tracer = Tracer(enabled=True)
         with tracer.trace_step("root") as _:
             pass
-        # After root span exits with disabled Langfuse, trace_id resets.
+        # After root span exits, the local correlation id resets.
         assert tracer._trace_id == ""
 
 

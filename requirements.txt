@@ -33,7 +33,6 @@ prometheus-client>=0.26.0            # /metrics scrape endpoint
 mcp>=2.3,<3                          # MCP server at /mcp and over stdio (src/mcp_server.py)
 
 # Observability (used only when MONITOR_ENABLED=true)
-langfuse>=2.60,<3                    # src/monitoring/tracing.py uses the v2 trace()/span() API
 opentelemetry-sdk>=1.30
 opentelemetry-exporter-otlp-proto-http>=1.30
 
