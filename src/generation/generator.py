@@ -90,12 +90,9 @@ class Generator:
         Returns:
             Generated answer string (with source citations).
         """
-        formatted_context = self._format_context(contexts)
-        prompt = (system_prompt or get_default_system_prompt()).format(context=formatted_context)
-
         return self._client.complete(
             prompt=query,
-            system=prompt,
+            system=self._build_system_prompt(contexts, system_prompt),
             temperature=self.temperature,
             max_tokens=self.max_tokens,
         )
@@ -116,12 +113,9 @@ class Generator:
         Returns:
             Generated answer string (with source citations).
         """
-        formatted_context = self._format_context(contexts)
-        prompt = (system_prompt or get_default_system_prompt()).format(context=formatted_context)
-
         return await self._client.complete_async(
             prompt=query,
-            system=prompt,
+            system=self._build_system_prompt(contexts, system_prompt),
             temperature=self.temperature,
             max_tokens=self.max_tokens,
         )
@@ -145,8 +139,7 @@ class Generator:
         Yields:
             str: Token / text chunks from the LLM stream.
         """
-        formatted_context = self._format_context(contexts)
-        system = (system_prompt or get_default_system_prompt()).format(context=formatted_context)
+        system = self._build_system_prompt(contexts, system_prompt)
 
         if self.provider == "openai":
             async for chunk in self._stream_openai(query, system):
@@ -215,6 +208,13 @@ class Generator:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _build_system_prompt(
+        self, contexts: list[dict[str, Any]], system_prompt: str | None
+    ) -> str:
+        return (system_prompt or get_default_system_prompt()).format(
+            context=self._format_context(contexts)
+        )
 
     @staticmethod
     def _format_context(contexts: list[dict[str, Any]]) -> str:

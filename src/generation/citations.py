@@ -50,9 +50,7 @@ class CitationFormatter:
             meta = r.get("metadata", {})
             score = r.get("rerank_score")
             if score is None:
-                score = r.get("score")
-            if score is None:
-                score = 0.0
+                score = r.get("score", 0.0)
             document = r.get("document", "")
             citations.append(
                 Citation(
