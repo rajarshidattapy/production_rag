@@ -10,13 +10,20 @@ For every task that changes repository code, configuration, dependencies, public
 6. Verify links, commands, and file paths added or changed in documentation.
 
 Documentation is part of the production deliverable. Complete these steps before reporting implementation work as finished.  
-  
-  
-What each file is:  
-1) [feature.md](http://feature.md) -&gt; future features I want
 
-2) [read.md](http://read.md)     -&gt; features I want to read about before implementing 
+## Documentation map
 
-3) [files.md](http://files.md)      -&gt; what each file does in the codebase
-
-4) [README.md](http://README.md) 
+- `docs/README.md` — project overview, architecture, Quickstart, configuration, and guide index.
+- `docs/api.md` — HTTP and MCP API contract index.
+- `docs/mcp.md` — MCP enablement, tools, and exposure guidance.
+- `docs/monitoring_observability.md` — Prometheus, OpenTelemetry, dashboards, and alerts.
+- `docs/evaluation.md` — golden datasets, quality metrics, and evaluation commands.
+- `docs/self_healing.md` — verification, repair, retry, and abstention behavior.
+- `docs/security.md` — authentication, secrets, content screening, and operational hardening.
+- `docs/deploy.md` — deployment, production readiness, and security deployment checklist.
+- `docs/testing.md` — test commands and testing expectations.
+- `docs/novelties.md` — implemented capabilities that distinguish the current system.
+- `docs/production_ready.md` — legacy path; deployment readiness now lives in `docs/deploy.md`.
+- `docs/files.md` — file and folder map for the codebase.
+- `docs/feature.md` — future features and known gaps.
+- `docs/read.md` — topics to research before implementation.
