@@ -108,12 +108,7 @@ class DocumentLoader:
 
     def _load_directory(self, directory: Path) -> list[Document]:
         """Load all supported files from a directory."""
-        docs: list[Document] = []
-        for file_path in self.list_files(directory):
-            try:
-                docs.append(self._load_file(file_path))
-            except Exception:
-                logger.exception("Failed to load %s, skipping", file_path)
+        docs = list(self.iter_docs(directory))
         logger.info("Loaded %d documents from %s", len(docs), directory)
         return docs
 
