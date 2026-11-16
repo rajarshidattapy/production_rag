@@ -32,6 +32,7 @@
 **Vector search**
 
 - **Chroma is only tested to 50k chunks** on a single node, with its index in memory. Load test it at your target size, and move to Qdrant only if that shows Chroma is the bottleneck. *Measured at 50k; nothing larger has been run.*
+- **A question only searches the collection of its detected language.** Chunks and questions are routed to `rag_docs_en`, `rag_docs_de`, or `rag_docs_es` by `langdetect`, which is unreliable on short text, so a misdetected question finds nothing even when the answer is indexed, and a question in one language can never reach a document in another although the embedding model is multilingual. Store everything in one collection with the language as metadata. *Measured: 1 of 20 short English questions ("error code 504") was detected as Spanish; the routing is from the code.*
 
 **Hybrid search (BM25)**
 

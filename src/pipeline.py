@@ -703,27 +703,8 @@ class RAGPipeline:
         token = _setup_translation(lang)
 
         try:
-            question = question.strip()
-            if not question:
-                raise ValueError(_("Question must not be empty."))
-            if len(question) > self.MAX_QUESTION_LENGTH:
-                raise ValueError(
-                    _(
-                        "Question is too long ({len_question} chars). "
-                        "Maximum allowed is {max_len} characters."
-                    ).format(len_question=len(question), max_len=self.MAX_QUESTION_LENGTH)
-                )
-
-            k, where = self._page_scope(question, top_k)
-
-            contexts = self._retrieve(
-                question,
-                use_hybrid=use_hybrid,
-                use_reranker=use_reranker,
-                k=k,
-                lang=lang,
-                where=where,
-            )
+            question = self._validate_question(question)
+            contexts, _k = self._retrieve_for_query(question, top_k, use_hybrid, use_reranker, lang)
 
             if not contexts:
                 logger.warning("No relevant context found for query: %s", question)
@@ -733,9 +714,6 @@ class RAGPipeline:
                     ),
                     [],
                 )
-
-            if use_reranker:
-                contexts = self._apply_reranker(question, contexts, top_k=k)
 
             contexts_for_generation = self._apply_context_budget(contexts)
             answer = self.generator.generate(question, contexts_for_generation)
@@ -785,27 +763,9 @@ class RAGPipeline:
         token = _setup_translation(lang)
 
         try:
-            question = question.strip()
-            if not question:
-                raise ValueError(_("Question must not be empty."))
-            if len(question) > self.MAX_QUESTION_LENGTH:
-                raise ValueError(
-                    _(
-                        "Question is too long ({len_question} chars). "
-                        "Maximum allowed is {max_len} characters."
-                    ).format(len_question=len(question), max_len=self.MAX_QUESTION_LENGTH)
-                )
-
-            k, where = await asyncio.to_thread(self._page_scope, question, top_k)
-
-            contexts = await asyncio.to_thread(
-                self._retrieve,
-                question,
-                use_hybrid=use_hybrid,
-                use_reranker=use_reranker,
-                k=k,
-                lang=lang,
-                where=where,
+            question = self._validate_question(question)
+            contexts, _k = await asyncio.to_thread(
+                self._retrieve_for_query, question, top_k, use_hybrid, use_reranker, lang
             )
 
             if not contexts:
@@ -815,11 +775,6 @@ class RAGPipeline:
                         "I could not find any relevant information in the knowledge base to answer your question."
                     ),
                     [],
-                )
-
-            if use_reranker:
-                contexts = await asyncio.to_thread(
-                    self._apply_reranker, question, contexts, top_k=k
                 )
 
             contexts_for_generation = self._apply_context_budget(contexts)
@@ -853,6 +808,27 @@ class RAGPipeline:
                 ).format(len_question=len(question), max_len=self.MAX_QUESTION_LENGTH)
             )
         return question
+
+    def _retrieve_for_query(
+        self,
+        question: str,
+        top_k: int | None,
+        use_hybrid: bool,
+        use_reranker: bool,
+        lang: str,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Scope, retrieve, and (if asked) rerank contexts for one query.
+
+        Shared by the sync and async query paths and by ``stream_answer``. Blocking, so
+        async callers run it in one worker-thread hop instead of one per step.
+        """
+        k, where = self._page_scope(question, top_k)
+        contexts = self._retrieve(
+            question, use_hybrid=use_hybrid, use_reranker=use_reranker, k=k, lang=lang, where=where
+        )
+        if use_reranker and contexts:
+            contexts = self._apply_reranker(question, contexts, top_k=k)
+        return contexts, k
 
     def _get_healing_engine(self) -> HealingEngine:
         with self._lock:
@@ -949,15 +925,9 @@ class RAGPipeline:
         import asyncio
 
         run = run_blocking or asyncio.to_thread
-        k, where = await run(self._page_scope, question, top_k)
-        contexts = await run(
-            self._retrieve,
-            question,
-            use_hybrid=use_hybrid,
-            use_reranker=use_reranker,
-            k=k,
-            lang=_detect_language(question),
-            where=where,
+        lang = _detect_language(question)
+        contexts, _k = await run(
+            self._retrieve_for_query, question, top_k, use_hybrid, use_reranker, lang
         )
         if not contexts:
             yield ("contexts", [])
@@ -969,8 +939,6 @@ class RAGPipeline:
             yield ("citations", [])
             return
 
-        if use_reranker:
-            contexts = await run(self._apply_reranker, question, contexts, top_k=k)
         contexts = self._apply_context_budget(contexts)
         yield ("contexts", contexts)
 

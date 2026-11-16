@@ -298,15 +298,9 @@ class _RecordingExtension:
         self.steps.append(step_name)
 
 
-def test_monitored_pipeline_traces_each_healing_attempt(
-    pipeline: RAGPipeline, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from src.monitoring.config import settings as monitoring_settings
+def test_monitored_pipeline_traces_each_healing_attempt(pipeline: RAGPipeline) -> None:
     from src.monitoring.extensions import LangfuseTracingExtension, OTelMetricsExtension
     from src.monitoring.wrappers import MonitoredRAGPipeline
-
-    # Keep the prompt registry out of the repo's data/ directory.
-    monkeypatch.setattr(monitoring_settings, "baseline_dir", str(tmp_path))
 
     calls = {"n": 0}
 

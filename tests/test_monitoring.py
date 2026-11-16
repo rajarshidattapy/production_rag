@@ -141,15 +141,11 @@ class TestMonitoredRAGPipeline:
         wrapped = MonitoredRAGPipeline(pipeline)
         assert wrapped.stats() == {"chunks_in_store": 7}
 
-    def test_otel_extension_tracks_latency_even_when_otel_down(self) -> None:
-        import time
-
+    def test_otel_extension_tracks_latency_without_a_meter(self) -> None:
+        # MetricsCollector keeps its own local lists regardless of whether an OTel
+        # meter is configured (enabled=False here means none was).
         mc = MetricsCollector(enabled=False)
         ext = OTelMetricsExtension(metrics=mc)
-        # Trip the circuit breaker and keep it OPEN by setting last_failure_time to now.
-        ext._cb.state = "OPEN"
-        ext._cb.last_failure_time = time.monotonic()
-        # Even with the breaker open, local in-process lists must still be updated.
         ext.on_query_end("ans", [], 0.55, {"prompt": 10, "completion": 5, "total": 15}, 0.001)
         assert mc.latencies == [0.55]
         assert mc.costs == [0.001]

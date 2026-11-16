@@ -58,7 +58,9 @@ class Settings(BaseSettings):
     # Required by POST /ingest/async. The API only publishes; a separate
     # ``python -m src.worker`` process consumes and indexes one job at a time.
     rabbitmq_url: str | None = Field(default=None, repr=False)
-    ingest_queue_name: str = Field(default="rag.ingest", pattern=r"^(?!amq\.)[A-Za-z0-9._-]{1,128}$")
+    # RabbitMQ rejects names starting with "amq." (reserved); the ingest worker would just
+    # fail to declare the queue, so that's left for RabbitMQ to reject rather than checked here.
+    ingest_queue_name: str = Field(default="rag.ingest", pattern=r"^[A-Za-z0-9._-]{1,128}$")
 
     # ---------- Chunking ----------
     chunk_size: int = 800

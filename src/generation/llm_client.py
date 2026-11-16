@@ -8,10 +8,15 @@ duplicated across ``Generator``, ``FaithfulnessScorer``, and
 from __future__ import annotations
 
 import os
-from typing import Any, Literal
+import time
+from typing import TYPE_CHECKING, Any, Literal
 
 from src.secret_files import secret_value
 from src.utils.retry import async_retry_with_backoff, retry_with_backoff
+from src.utils.usage import request_usage
+
+if TYPE_CHECKING:
+    from openai.types.chat import ChatCompletionMessageParam
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -62,6 +67,54 @@ def uses_openrouter(model: str) -> bool:
 
     api_key = _openai_api_key()
     return api_key.startswith("sk-or-") or "/" in model.strip()
+
+
+# ---------------------------------------------------------------------------
+# Provider-specific request building and response parsing, shared by the sync
+# and async call methods below (the only thing that differs between those is
+# the `await`s, which Python gives no way to share).
+# ---------------------------------------------------------------------------
+
+
+def _openai_messages(prompt: str, system: str | None) -> list[ChatCompletionMessageParam]:
+    messages: list[ChatCompletionMessageParam] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    return messages
+
+
+def _openai_usage(response: Any) -> tuple[int, int]:
+    usage = getattr(response, "usage", None)
+    if not usage:
+        return 0, 0
+    return getattr(usage, "prompt_tokens", 0), getattr(usage, "completion_tokens", 0)
+
+
+def _anthropic_create_kwargs(
+    model: str, prompt: str, system: str | None, max_tokens: int
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+    }
+    if system:
+        kwargs["system"] = system
+    return kwargs
+
+
+def _anthropic_usage(response: Any) -> tuple[int, int]:
+    usage = getattr(response, "usage", None)
+    if not usage:
+        return 0, 0
+    return getattr(usage, "input_tokens", 0), getattr(usage, "output_tokens", 0)
+
+
+def _record_usage(prompt_tokens: int, completion_tokens: int, latency: float) -> None:
+    tracker = request_usage.get()
+    if tracker is not None:
+        tracker.add_call(prompt_tokens, completion_tokens, latency)
 
 
 class LLMClient:
@@ -168,38 +221,21 @@ class LLMClient:
     ) -> str:
         try:
             from openai import OpenAI
-            from openai.types.chat import ChatCompletionMessageParam
         except ImportError:
             raise ImportError("openai package required. Install with: pip install openai") from None
 
         client = OpenAI(timeout=self.timeout, max_retries=0, **self.openai_client_kwargs())
-        messages: list[ChatCompletionMessageParam] = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
+        messages = _openai_messages(prompt, system)
 
         def _api_call():
             return client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
+                model=self.model, messages=messages, temperature=temperature, max_tokens=max_tokens
             )
-
-        import time
-
-        from src.utils.usage import request_usage
 
         start_time = time.perf_counter()
         response = retry_with_backoff(_api_call)
-        latency = time.perf_counter() - start_time
-
-        if getattr(response, "usage", None):
-            prompt_tokens = getattr(response.usage, "prompt_tokens", 0)
-            completion_tokens = getattr(response.usage, "completion_tokens", 0)
-            tracker = request_usage.get()
-            if tracker is not None:
-                tracker.add_call(prompt_tokens, completion_tokens, latency)
+        prompt_tokens, completion_tokens = _openai_usage(response)
+        _record_usage(prompt_tokens, completion_tokens, time.perf_counter() - start_time)
 
         return response.choices[0].message.content or ""
 
@@ -214,36 +250,15 @@ class LLMClient:
         client = anthropic.Anthropic(
             timeout=self.timeout, max_retries=0, **anthropic_client_kwargs()
         )
+        create_kwargs = _anthropic_create_kwargs(self.model, prompt, system, max_tokens)
 
         def _api_call():
-            if system:
-                return client.messages.create(
-                    model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=max_tokens,
-                    system=system,
-                )
-            else:
-                return client.messages.create(
-                    model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=max_tokens,
-                )
-
-        import time
-
-        from src.utils.usage import request_usage
+            return client.messages.create(**create_kwargs)
 
         start_time = time.perf_counter()
         response = retry_with_backoff(_api_call)
-        latency = time.perf_counter() - start_time
-
-        if getattr(response, "usage", None):
-            prompt_tokens = getattr(response.usage, "input_tokens", 0)
-            completion_tokens = getattr(response.usage, "output_tokens", 0)
-            tracker = request_usage.get()
-            if tracker is not None:
-                tracker.add_call(prompt_tokens, completion_tokens, latency)
+        prompt_tokens, completion_tokens = _anthropic_usage(response)
+        _record_usage(prompt_tokens, completion_tokens, time.perf_counter() - start_time)
 
         return response.content[0].text if response.content else ""
 
@@ -252,38 +267,21 @@ class LLMClient:
     ) -> str:
         try:
             from openai import AsyncOpenAI
-            from openai.types.chat import ChatCompletionMessageParam
         except ImportError:
             raise ImportError("openai package required. Install with: pip install openai") from None
 
         client = AsyncOpenAI(timeout=self.timeout, max_retries=0, **self.openai_client_kwargs())
-        messages: list[ChatCompletionMessageParam] = []
-        if system:
-            messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": prompt})
+        messages = _openai_messages(prompt, system)
 
         async def _api_call():
             return await client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
+                model=self.model, messages=messages, temperature=temperature, max_tokens=max_tokens
             )
-
-        import time
-
-        from src.utils.usage import request_usage
 
         start_time = time.perf_counter()
         response = await async_retry_with_backoff(_api_call)
-        latency = time.perf_counter() - start_time
-
-        if getattr(response, "usage", None):
-            prompt_tokens = getattr(response.usage, "prompt_tokens", 0)
-            completion_tokens = getattr(response.usage, "completion_tokens", 0)
-            tracker = request_usage.get()
-            if tracker is not None:
-                tracker.add_call(prompt_tokens, completion_tokens, latency)
+        prompt_tokens, completion_tokens = _openai_usage(response)
+        _record_usage(prompt_tokens, completion_tokens, time.perf_counter() - start_time)
 
         return response.choices[0].message.content or ""
 
@@ -298,35 +296,14 @@ class LLMClient:
         client = anthropic.AsyncAnthropic(
             timeout=self.timeout, max_retries=0, **anthropic_client_kwargs()
         )
+        create_kwargs = _anthropic_create_kwargs(self.model, prompt, system, max_tokens)
 
         async def _api_call():
-            if system:
-                return await client.messages.create(
-                    model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=max_tokens,
-                    system=system,
-                )
-            else:
-                return await client.messages.create(
-                    model=self.model,
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=max_tokens,
-                )
-
-        import time
-
-        from src.utils.usage import request_usage
+            return await client.messages.create(**create_kwargs)
 
         start_time = time.perf_counter()
         response = await async_retry_with_backoff(_api_call)
-        latency = time.perf_counter() - start_time
-
-        if getattr(response, "usage", None):
-            prompt_tokens = getattr(response.usage, "input_tokens", 0)
-            completion_tokens = getattr(response.usage, "output_tokens", 0)
-            tracker = request_usage.get()
-            if tracker is not None:
-                tracker.add_call(prompt_tokens, completion_tokens, latency)
+        prompt_tokens, completion_tokens = _anthropic_usage(response)
+        _record_usage(prompt_tokens, completion_tokens, time.perf_counter() - start_time)
 
         return response.content[0].text if response.content else ""

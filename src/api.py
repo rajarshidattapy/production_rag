@@ -24,6 +24,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
+import anthropic
+import openai
 from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -309,71 +311,44 @@ async def vector_store_unavailable_handler(request: Request, exc: VectorStoreUna
     )
 
 
-# --- OpenAI Exception Handlers ---
-try:
-    import openai
+# --- OpenAI and Anthropic exception handlers ---
+# Both SDKs give their rate-limit, connection, and generic status errors the same names and
+# shape, so one set of handlers covers both providers.
 
-    @app.exception_handler(openai.RateLimitError)
-    async def openai_rate_limit_handler(request: Request, exc: openai.RateLimitError):
-        return Response(
-            status_code=429,
-            content='{"detail": "Rate limit exceeded on upstream LLM provider API."}',
-            media_type="application/json",
-        )
 
-    @app.exception_handler(openai.APIConnectionError)
-    async def openai_connection_handler(request: Request, exc: openai.APIConnectionError):
-        return Response(
-            status_code=503,
-            content='{"detail": "Failed to connect to upstream LLM provider API."}',
-            media_type="application/json",
-        )
+async def _upstream_rate_limit_handler(request: Request, exc: Exception) -> Response:
+    return Response(
+        status_code=429,
+        content='{"detail": "Rate limit exceeded on upstream LLM provider API."}',
+        media_type="application/json",
+    )
 
-    @app.exception_handler(openai.APIStatusError)
-    async def openai_status_handler(request: Request, exc: openai.APIStatusError):
-        status = 502
-        if exc.status_code == 429:
-            status = 429
-        return Response(
-            status_code=status,
-            content=f'{{"detail": "Upstream LLM provider returned error status: {exc.status_code}."}}',
-            media_type="application/json",
-        )
-except ImportError:
-    pass
 
-# --- Anthropic Exception Handlers ---
-try:
-    import anthropic
+async def _upstream_connection_handler(request: Request, exc: Exception) -> Response:
+    return Response(
+        status_code=503,
+        content='{"detail": "Failed to connect to upstream LLM provider API."}',
+        media_type="application/json",
+    )
 
-    @app.exception_handler(anthropic.RateLimitError)
-    async def anthropic_rate_limit_handler(request: Request, exc: anthropic.RateLimitError):
-        return Response(
-            status_code=429,
-            content='{"detail": "Rate limit exceeded on upstream LLM provider API."}',
-            media_type="application/json",
-        )
 
-    @app.exception_handler(anthropic.APIConnectionError)
-    async def anthropic_connection_handler(request: Request, exc: anthropic.APIConnectionError):
-        return Response(
-            status_code=503,
-            content='{"detail": "Failed to connect to upstream LLM provider API."}',
-            media_type="application/json",
-        )
+async def _upstream_status_handler(request: Request, exc: Exception) -> Response:
+    # Only ever called for openai.APIStatusError / anthropic.APIStatusError (see registration
+    # below), both of which set status_code; typed as the base Exception so this matches
+    # add_exception_handler's one non-generic signature for every exception class it's given.
+    code = getattr(exc, "status_code", None)
+    status = 429 if code == 429 else 502
+    return Response(
+        status_code=status,
+        content=f'{{"detail": "Upstream LLM provider returned error status: {code}."}}',
+        media_type="application/json",
+    )
 
-    @app.exception_handler(anthropic.APIStatusError)
-    async def anthropic_status_handler(request: Request, exc: anthropic.APIStatusError):
-        status = 502
-        if exc.status_code == 429:
-            status = 429
-        return Response(
-            status_code=status,
-            content=f'{{"detail": "Upstream LLM provider returned error status: {exc.status_code}."}}',
-            media_type="application/json",
-        )
-except ImportError:
-    pass
+
+for _provider_sdk in (openai, anthropic):
+    app.add_exception_handler(_provider_sdk.RateLimitError, _upstream_rate_limit_handler)
+    app.add_exception_handler(_provider_sdk.APIConnectionError, _upstream_connection_handler)
+    app.add_exception_handler(_provider_sdk.APIStatusError, _upstream_status_handler)
 
 # Module-level singleton, constructed lazily on first use so that /healthz
 # does not force-load the embedding model or Chroma client.
@@ -1547,6 +1522,16 @@ async def query_stream(
     timeout = _query_timeout()
     owners = await asyncio.to_thread(_visible_owners, rag_session)
 
+    async def _yield_chunked_tokens(answer: str) -> AsyncGenerator[str, None]:
+        """Stream an already-complete answer as SSE token events, word by word.
+
+        Used when the full answer has to be computed before anything can be sent (self-healing
+        verifies before it answers; redaction needs the whole text, since a pattern can span
+        two streamed tokens), so clients still render it the same way as live LLM tokens.
+        """
+        for piece in _SSE_CHUNK_RE.findall(_outgoing(answer)):
+            yield f"data: {json.dumps({'token': piece})}\n\n"
+
     async def _event_stream() -> AsyncGenerator[str, None]:
         deadline = None if timeout is None else time.monotonic() + timeout
         # Set here because the body runs while the response is sent, after this route returns.
@@ -1573,8 +1558,8 @@ async def query_stream(
                     ),
                     timeout,
                 )
-                for piece in _SSE_CHUNK_RE.findall(_outgoing(result.answer)):
-                    yield f"data: {json.dumps({'token': piece})}\n\n"
+                async for sse_line in _yield_chunked_tokens(result.answer):
+                    yield sse_line
                 yield f"data: {json.dumps({'healing': _healing_payload(result.info)})}\n\n"
                 citation_dicts = _citation_dicts(result.citations)
                 yield f"data: {json.dumps({'citations': citation_dicts})}\n\n"
@@ -1592,8 +1577,8 @@ async def query_stream(
                     ),
                     timeout,
                 )
-                for piece in _SSE_CHUNK_RE.findall(_outgoing(answer)):
-                    yield f"data: {json.dumps({'token': piece})}\n\n"
+                async for sse_line in _yield_chunked_tokens(answer):
+                    yield sse_line
                 yield f"data: {json.dumps({'citations': _citation_dicts(citations)})}\n\n"
                 return
 

@@ -2,7 +2,15 @@
 
 [https://x.com/\_jaydeepkarale/status/2107744969146458595](https://x.com/_jaydeepkarale/status/2107744969146458595)
 
+[https://x.com/AdityaPat\_/status/2059986607718203891?a=QMrz7CYSV5\_bBWgawMM&amp;s=20](https://x.com/AdityaPat_/status/2059986607718203891?a=QMrz7CYSV5_bBWgawMM&s=20)
 
+
+
+Docs:
+
+1) RAGAS: [https://docs.ragas.io/en/latest](https://docs.ragas.io/en/latest/?utm_source=chatgpt.com)
+
+2) DeepEval: [https://deepeval.com/docs/getting-started](https://deepeval.com/docs/getting-started?utm_source=chatgpt.com)
 
 ## Optimizing for 20 million docs:
 

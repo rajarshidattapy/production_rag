@@ -32,12 +32,8 @@ class MonitoringSettings(BaseSettings):
     pricing_file: str = "pricing.json"
     baseline_dir: str = "data/monitoring"
     query_timeout_seconds: int = 120
-    async_telemetry: bool = True
-    circuit_breaker_threshold: int = 3
-    circuit_breaker_cooldown_seconds: float = 30.0
     otel_export_interval_ms: int = 10000
     otel_export_timeout_ms: int = 5000
-    max_queue_size: int = 10000
 
     @classmethod
     def settings_customise_sources(
