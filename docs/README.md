@@ -96,4 +96,4 @@ flowchart TD
 Hybrid search, reranking, and self-healing are three independent switches, all off by default. Instrumentation is shown separately in [Monitoring & Observability](#monitoring--observability), because it differs by entry point.
 
 
-For detailed operations, configuration, deployment, evaluation, and security guidance, see [feature.md](feature.md), [files.md](files.md), and the source-level documentation.
+For detailed operations, configuration, deployment, evaluation, and security guidance, see [api.md](api.md), [novelties.md](novelties.md), [feature.md](feature.md), [files.md](files.md), and the source-level documentation.

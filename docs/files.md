@@ -9,7 +9,7 @@ This is a production-ready RAG (Retrieval-Augmented Generation) application: it 
 | `tests` (tests)                                             | Automated tests for every major feature.                                                                                |
 | `data` (data)                                               | Runtime data: uploaded documents, vector index, SQLite databases, evaluation datasets.                                  |
 | `scripts` (scripts)                                         | Command-line utilities for ingesting, querying, evaluating, benchmarking, and administration.                           |
-| `docs` (docs)                                               | Project documentation. [`README.md`](http://README.md) (docs/[README.md](http://README.md)) is the comprehensive guide. |
+| `docs` (docs)                                               | Project documentation: [`README.md`](README.md) overview, [`api.md`](api.md) API index, [`novelties.md`](novelties.md) implemented capabilities, and [`files.md`](files.md) file map. |
 | `index.html` (index.html)                                   | Single-page browser chat/upload UI served by the API.                                                                   |
 | `pyproject.toml` (pyproject.toml)                           | Python project metadata, tooling configuration, lint/test settings.                                                     |
 | `requirements.txt` (requirements.txt)                       | Python dependencies.                                                                                                    |
